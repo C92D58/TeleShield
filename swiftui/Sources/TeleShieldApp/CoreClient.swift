@@ -36,7 +36,7 @@ final class CoreClient: ObservableObject {
     private var stdoutBuffer = Data()
     private var nextRequestID = 1
     private var pending: [Int: CheckedContinuation<Data, Error>] = [:]
-    private var backgroundStartupHandled = false
+    private var automaticProtectionHandled = false
     private var scanStartInFlight = false
     private var stdoutReadHandle: FileHandle?
     private var stderrReadHandle: FileHandle?
@@ -117,7 +117,7 @@ final class CoreClient: ObservableObject {
             await refreshAccountData()
             let startupData = try await request(method: "get_startup_status")
             startupEnabled = try decodeResult(StartupStatus.self, from: startupData).enabled
-            await handleBackgroundLaunchIfNeeded()
+            await startAutomaticProtectionIfNeeded()
         } catch {
             present(error: error)
         }
@@ -530,10 +530,12 @@ final class CoreClient: ObservableObject {
         Task { await shutdownGracefully() }
     }
 
-    private func handleBackgroundLaunchIfNeeded() async {
-        guard !backgroundStartupHandled,
-              ProcessInfo.processInfo.arguments.contains("--background") else { return }
-        backgroundStartupHandled = true
+    private func startAutomaticProtectionIfNeeded() async {
+        // The account-level setting applies to every fresh app launch. The
+        // --background argument is only used to hide the window when macOS
+        // starts TeleShield at login; manual launches must run the same path.
+        guard !automaticProtectionHandled else { return }
+        automaticProtectionHandled = true
         let autoStartAccountIDs = details?.autoStartAccountIDs ?? []
         guard !autoStartAccountIDs.isEmpty else { return }
         let originalAccountID = selectedAccountID
@@ -731,3 +733,4 @@ private extension JSONEncoder {
         return encoder
     }
 }
+
