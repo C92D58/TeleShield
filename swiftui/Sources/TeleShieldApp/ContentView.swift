@@ -179,6 +179,9 @@ private struct OverviewView: View {
             }
             .padding(28)
         }
+        .task(id: client.selectedAccountID) {
+            await client.fetchBlockRecords(query: "", source: "all")
+        }
     }
 }
 
@@ -284,12 +287,35 @@ private struct EventLogCard: View {
                 Label("最近活動", systemImage: "list.bullet.rectangle")
                     .font(.headline)
                 Spacer()
-                Text("最多保留 300 筆")
+                Text("目前帳號的最新封鎖記錄")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
-            if client.eventLog.isEmpty {
-                Text("尚無事件。啟動防護、掃描或管理名單後，操作紀錄會顯示在這裡。")
+            if !client.blockRecords.isEmpty {
+                ForEach(Array(client.blockRecords.prefix(12))) { record in
+                    HStack(alignment: .top, spacing: 8) {
+                        Circle().fill(.red).frame(width: 7, height: 7).padding(.top, 5)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text(record.name.isEmpty ? record.userID : record.name)
+                                    .font(.callout.weight(.medium))
+                                Text(record.source == "group" ? "群組" : "私訊")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(record.reason.isEmpty ? "未記錄原因" : record.reason)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                        Text(record.time.replacingOccurrences(of: "T", with: " "))
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            } else if client.eventLog.isEmpty {
+                Text("尚無封鎖活動。啟動防護、掃描或管理名單後，操作紀錄會顯示在這裡。")
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(Array(client.eventLog.suffix(12).reversed())) { event in

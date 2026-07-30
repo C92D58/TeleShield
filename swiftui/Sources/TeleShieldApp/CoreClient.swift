@@ -143,6 +143,7 @@ final class CoreClient: ObservableObject {
             // the new account is being loaded.
             self.report = nil
             self.blockRecords = []
+            self.eventLog.removeAll()
             _ = try await self.request(method: "select_account", params: ["account_id": .string(accountID)])
             await self.refresh()
         }
