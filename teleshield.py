@@ -18,11 +18,29 @@ Telegram 廣告封鎖工具 — TeleShield 完整版
 import asyncio, os, json, re, sys, time, tempfile, random
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from telethon import events
 from collections import defaultdict
 
 # ──────────── 設定 ────────────
-SESSION_DIR = Path("/root/.tg-sessions")
+
+def default_session_dir() -> Path:
+    """Return a writable per-user data directory on every supported OS."""
+    override = os.getenv("TELESHIELD_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
+
+    if sys.platform == "win32":
+        root = Path(os.getenv("APPDATA", Path.home() / "AppData/Roaming"))
+        return root / "TeleShield"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "TeleShield"
+
+    root = Path(os.getenv("XDG_DATA_HOME", Path.home() / ".local/share"))
+    return root / "TeleShield"
+
+
+SESSION_DIR = default_session_dir()
 SESSION_FILE = SESSION_DIR / "user.session"
 CONFIG_FILE = SESSION_DIR / "config.json"
 BLOCK_LOG = SESSION_DIR / "block_log.json"
@@ -55,8 +73,14 @@ def load_config():
     return {}
 
 def save_config(cfg):
-    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+    CONFIG_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp_file = CONFIG_FILE.with_suffix(".json.tmp")
+    tmp_file.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+    os.replace(tmp_file, CONFIG_FILE)
+    try:
+        CONFIG_FILE.chmod(0o600)
+    except OSError:
+        pass
 
 def load_block_log():
     if BLOCK_LOG.exists():
@@ -64,7 +88,12 @@ def load_block_log():
     return {"blocks": []}
 
 def save_block_log(log):
+    BLOCK_LOG.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     BLOCK_LOG.write_text(json.dumps(log, indent=2, ensure_ascii=False))
+    try:
+        BLOCK_LOG.chmod(0o600)
+    except OSError:
+        pass
 
 def load_learned_patterns():
     f = SESSION_DIR / "learned_patterns.json"
@@ -73,6 +102,7 @@ def load_learned_patterns():
     return {"keywords": [], "patterns": []}
 
 def save_learned_patterns(data):
+    SESSION_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     (SESSION_DIR / "learned_patterns.json").write_text(json.dumps(data, indent=2, ensure_ascii=False))
 
 def is_spam(text: str, cfg: dict = None) -> bool:
@@ -200,7 +230,9 @@ async def learn(text: str):
 async def manage_list(action: str, list_type: str, user_id_str: str = None):
     """管理白名單或黑名單"""
     cfg = load_config()
-    key = f"{list_type}_list"
+    # Runtime checks use the canonical keys ``whitelist`` and ``blacklist``.
+    # Keep the CLI and desktop UI on the same schema.
+    key = list_type
     lst = cfg.get(key, {})
 
     if action == "list":
@@ -307,8 +339,74 @@ async def report(period: str = "day"):
 
 # ──────────── 首次設定 ────────────
 
-async def setup(api_id: str = None, api_hash: str = None, phone: str = None, code: str = None):
+async def authenticate(
+    api_id: str,
+    api_hash: str,
+    phone: str,
+    code_callback,
+    password_callback,
+    status_callback=None,
+):
+    """Authenticate the personal Telegram client without requiring a CLI prompt."""
     from telethon import TelegramClient
+    from telethon.errors import SessionPasswordNeededError
+
+    SESSION_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    client = TelegramClient(str(SESSION_FILE), int(api_id), api_hash)
+
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            sent_code = await client.send_code_request(phone)
+            if status_callback:
+                delivery = type(getattr(sent_code, "type", None)).__name__
+                delivery = delivery.replace("SentCodeType", "") or "未知方式"
+                details = []
+                next_type = getattr(sent_code, "next_type", None)
+                if next_type is not None:
+                    next_delivery = type(next_type).__name__.replace("SentCodeType", "")
+                    if next_delivery:
+                        details.append(f"下一個可用方式：{next_delivery}")
+                timeout = getattr(sent_code, "timeout", None)
+                if timeout is not None:
+                    details.append(f"等待時間：{timeout} 秒")
+                status_callback("；".join([delivery, *details]))
+            code_value = await code_callback()
+            if not code_value:
+                raise ValueError("Telegram 驗證碼不可為空")
+            try:
+                await client.sign_in(phone=phone, code=code_value)
+            except SessionPasswordNeededError:
+                password_value = await password_callback()
+                if not password_value:
+                    raise ValueError("Telegram 兩步驟驗證密碼不可為空")
+                await client.sign_in(password=password_value)
+
+        me = await client.get_me()
+        cfg = load_config()
+        cfg.update({
+            "api_id": int(api_id),
+            "api_hash": api_hash,
+            "phone": phone,
+            "user_id": me.id,
+            "username": me.username,
+        })
+        cfg.setdefault("blocked_count", 0)
+        cfg.setdefault("kicked_count", 0)
+        cfg.setdefault("last_scan", None)
+        cfg.setdefault("whitelist", {})
+        cfg.setdefault("blacklist", {})
+        cfg.setdefault("managed_groups", [])
+        cfg.setdefault("learned_patterns", {"keywords": [], "patterns": []})
+        cfg.setdefault("listen_scan_groups", True)
+        cfg.setdefault("auto_start_protection", False)
+        save_config(cfg)
+        return me
+    finally:
+        await client.disconnect()
+
+
+async def setup(api_id: str = None, api_hash: str = None, phone: str = None, code: str = None):
 
     print("\n═══════════════════════════════")
     print("  TeleShield - 設定")
@@ -327,37 +425,248 @@ async def setup(api_id: str = None, api_hash: str = None, phone: str = None, cod
     else:
         print(f"手機隱藏")
 
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    client = TelegramClient(str(SESSION_FILE), int(api_id), api_hash)
-
     try:
-        await client.start(phone=phone, code_callback=lambda: code or input("請輸入驗證碼: "))
-        me = await client.get_me()
+        async def code_callback():
+            return code or await asyncio.to_thread(input, "請輸入驗證碼: ")
+
+        async def password_callback():
+            return await asyncio.to_thread(input, "請輸入兩步驟驗證密碼: ")
+
+        me = await authenticate(api_id, api_hash, phone, code_callback, password_callback)
         print(f"\n✅ 登入成功！")
         print(f"   帳號: {me.first_name} (@{me.username or '無'})")
         print(f"   ID: {me.id}")
-
-        save_config({
-            "api_id": int(api_id),
-            "api_hash": api_hash,
-            "phone": phone,
-            "user_id": me.id,
-            "username": me.username,
-            "blocked_count": 0,
-            "kicked_count": 0,
-            "last_scan": None,
-            "whitelist": {},
-            "blacklist": {},
-            "managed_groups": [],
-            "learned_patterns": {"keywords": [], "patterns": []},
-            "listen_scan_groups": True,
-        })
         print("✅ 設定已儲存")
-        await client.disconnect()
         return True
     except Exception as e:
         print(f"\n❌ 登入失敗: {e}")
         return False
+
+# ──────────── 歷史訊息掃描核心 ────────────
+
+async def scan_history(
+    scope: str = "private",
+    dry_run: bool = False,
+    progress_callback=None,
+    cancel_event=None,
+):
+    """Scan recent private/group history and optionally apply moderation.
+
+    This API is UI-friendly: it never prompts on stdin, reports progress through
+    ``progress_callback``, and checks ``cancel_event`` between Telegram calls.
+    The existing CLI commands remain available below for backwards compatibility.
+    """
+    from telethon import TelegramClient
+    from telethon.tl.functions.channels import EditBannedRequest
+    from telethon.tl.functions.contacts import BlockRequest, GetContactsRequest
+    from telethon.tl.types import Chat, ChatBannedRights, Channel, User
+
+    if scope not in {"private", "group"}:
+        raise ValueError("scope 必須是 private 或 group")
+
+    cfg = load_config()
+    if not cfg.get("api_id"):
+        raise RuntimeError("尚未登入 Telegram")
+
+    result = {
+        "scope": scope,
+        "dry_run": dry_run,
+        "dialogs_seen": 0,
+        "dialogs_scanned": 0,
+        "groups_found": 0,
+        "messages_scanned": 0,
+        "matched": 0,
+        "acted": 0,
+        "errors": [],
+        "findings": [],
+        "cancelled": False,
+    }
+    now = datetime.now(timezone.utc)
+
+    def cancelled() -> bool:
+        return bool(cancel_event and cancel_event.is_set())
+
+    def progress(message: str) -> None:
+        if progress_callback:
+            progress_callback(message)
+
+    def add_error(message: str) -> None:
+        result["errors"].append(message)
+        progress(f"⚠️ {message}")
+
+    client = TelegramClient(str(SESSION_FILE), cfg["api_id"], cfg["api_hash"])
+    connected = False
+    try:
+        progress("正在連線 Telegram…")
+        await client.connect()
+        connected = True
+        if not await client.is_user_authorized():
+            raise RuntimeError("Telegram Session 已失效，請先重新登入")
+        if cancelled():
+            result["cancelled"] = True
+            return result
+
+        contacts = (await client(GetContactsRequest(hash=0))).users
+        contact_ids = {contact.id for contact in contacts}
+
+        if scope == "private":
+            dialogs = await client.get_dialogs(limit=30)
+            total = len(dialogs)
+            for index, dialog in enumerate(dialogs, 1):
+                result["dialogs_seen"] += 1
+                if cancelled():
+                    result["cancelled"] = True
+                    break
+                entity = dialog.entity
+                if (
+                    not isinstance(entity, User)
+                    or entity.is_self
+                    or entity.bot
+                    or entity.id in contact_ids
+                    or is_whitelisted(entity.id, cfg)
+                ):
+                    continue
+                result["dialogs_scanned"] += 1
+                progress(f"掃描私訊 {index}/{total}…")
+                try:
+                    messages = await client.get_messages(entity, limit=5)
+                except Exception as exc:
+                    add_error(f"私訊讀取失敗（{entity.id}）：{exc}")
+                    continue
+                result["messages_scanned"] += len(messages)
+
+                for message in messages:
+                    if cancelled():
+                        result["cancelled"] = True
+                        break
+                    if not message:
+                        continue
+                    if message.date and message.date < now - timedelta(days=14):
+                        continue
+                    reason = message.text or ""
+                    if not is_spam(reason, cfg) and message.photo:
+                        ocr_text = await check_photo(client, message)
+                        if ocr_text and is_spam(ocr_text, cfg):
+                            reason = f"[OCR] {ocr_text[:100]}"
+                    if not reason or not is_spam(reason, cfg):
+                        continue
+
+                    result["matched"] += 1
+                    name = f"{entity.first_name or ''} {entity.last_name or ''}".strip()
+                    finding = {
+                        "user_id": entity.id,
+                        "name": name or str(entity.id),
+                        "reason": reason[:120],
+                    }
+                    result["findings"].append(finding)
+                    progress(f"⚠️ 發現私訊廣告：{finding['name']}")
+                    if dry_run:
+                        break
+                    try:
+                        await client(BlockRequest(id=entity.id))
+                        result["acted"] += 1
+                        log_block(entity.id, finding["name"], reason, "scan")
+                        progress(f"✅ 已封鎖：{finding['name']}")
+                    except Exception as exc:
+                        add_error(f"封鎖失敗（{entity.id}）：{exc}")
+                    break
+        else:
+            me = await client.get_me()
+            dialogs = await client.get_dialogs(limit=50)
+            groups = []
+            for dialog in dialogs:
+                result["dialogs_seen"] += 1
+                entity = dialog.entity
+                if not isinstance(entity, (Chat, Channel)) or getattr(entity, "broadcast", False):
+                    continue
+                try:
+                    permissions = await client.get_permissions(entity, me.id)
+                    if permissions and permissions.is_admin:
+                        groups.append(dialog)
+                except Exception as exc:
+                    add_error(f"群組權限讀取失敗（{getattr(entity, 'title', entity.id)}）：{exc}")
+            result["groups_found"] = len(groups)
+            progress(f"找到 {len(groups)} 個可管理群組")
+
+            handled = set()
+            for group_index, dialog in enumerate(groups, 1):
+                if cancelled():
+                    result["cancelled"] = True
+                    break
+                entity = dialog.entity
+                title = getattr(entity, "title", "未知群組")
+                progress(f"掃描群組 {group_index}/{len(groups)}：{title}")
+                try:
+                    messages = await client.get_messages(entity, limit=20)
+                except Exception as exc:
+                    add_error(f"群組讀取失敗（{title}）：{exc}")
+                    continue
+                result["messages_scanned"] += len(messages)
+
+                for message in messages:
+                    if cancelled():
+                        result["cancelled"] = True
+                        break
+                    if (
+                        not message
+                        or not message.sender_id
+                        or message.sender_id == me.id
+                        or message.sender_id in contact_ids
+                        or is_whitelisted(message.sender_id, cfg)
+                    ):
+                        continue
+                    if message.date and message.date < now - timedelta(days=3):
+                        continue
+
+                    reason = message.text or ""
+                    if not is_spam(reason, cfg) and message.photo:
+                        ocr_text = await check_photo(client, message)
+                        if ocr_text and is_spam(ocr_text, cfg):
+                            reason = f"[OCR] {ocr_text[:80]}"
+                    if not reason or not is_spam(reason, cfg):
+                        continue
+
+                    result["matched"] += 1
+                    try:
+                        sender = await client.get_entity(message.sender_id)
+                        name = f"{sender.first_name or ''} {sender.last_name or ''}".strip()
+                    except Exception:
+                        name = str(message.sender_id)
+                    finding = {
+                        "user_id": message.sender_id,
+                        "name": name or str(message.sender_id),
+                        "group": title,
+                        "reason": reason[:100],
+                    }
+                    result["findings"].append(finding)
+                    progress(f"⚠️ 發現群組廣告：{title}／{finding['name']}")
+                    action_key = (entity.id, message.sender_id)
+                    if dry_run or action_key in handled:
+                        continue
+                    handled.add(action_key)
+                    try:
+                        rights = ChatBannedRights(until_date=None, view_messages=True)
+                        await client(EditBannedRequest(entity, message.sender_id, rights))
+                        result["acted"] += 1
+                        log_block(message.sender_id, finding["name"], reason, "group")
+                        progress(f"✅ 已踢除：{finding['name']}（{title}）")
+                    except Exception as exc:
+                        add_error(f"踢除失敗（{message.sender_id}／{title}）：{exc}")
+
+        if not dry_run:
+            if scope == "private":
+                cfg["blocked_count"] = cfg.get("blocked_count", 0) + result["acted"]
+            else:
+                cfg["kicked_count"] = cfg.get("kicked_count", 0) + result["acted"]
+            cfg["last_scan"] = now.isoformat()
+        else:
+            cfg["last_preview"] = now.isoformat()
+        save_config(cfg)
+        return result
+    finally:
+        if connected:
+            await client.disconnect()
+
 
 # ──────────── 掃描私訊封鎖 ────────────
 
@@ -573,7 +882,7 @@ async def scan_groups(dry_run: bool = False):
 
 # ──────────── 即時監聽（私訊+群組） ────────────
 
-async def listen():
+async def listen(stop_event: Optional[asyncio.Event] = None, ready_callback=None) -> bool:
     from telethon import TelegramClient
     from telethon.tl.functions.contacts import BlockRequest
     from telethon.tl.functions.channels import EditBannedRequest
@@ -583,7 +892,7 @@ async def listen():
     cfg = load_config()
     if not cfg.get("api_id"):
         print("❌ 尚未設定")
-        return
+        return False
 
     print("👂 TeleShield 即時監聽啟動中...")
     print("    ✅ 私訊廣告 → 自動封鎖")
@@ -598,6 +907,10 @@ async def listen():
         msg = event.message
         if not msg or not msg.sender_id:
             return
+
+        # Reload settings so desktop and Bot controls take effect without
+        # restarting the long-running Telethon client.
+        cfg = load_config()
 
         sender_id = msg.sender_id
         chat = await event.get_chat()
@@ -719,15 +1032,43 @@ async def listen():
                 print(f"     ❌ 踢除失敗: {e}")
 
     try:
-        await client.start(phone=cfg["phone"])
+        # Do not call ``start(phone=...)`` here: in a windowless packaged app
+        # Telethon could fall back to stdin prompts if the Session expires.
+        await client.connect()
+        if not await client.is_user_authorized():
+            print("❌ Telegram Session 已失效，請從桌面 App 重新登入")
+            return False
+        if ready_callback:
+            ready_callback()
         print(f"✅ TeleShield 已上線 — 監聽中...")
-        await client.run_until_disconnected()
+        run_task = asyncio.create_task(client.run_until_disconnected())
+        if stop_event is None:
+            await run_task
+        else:
+            stop_task = asyncio.create_task(stop_event.wait())
+            done, pending = await asyncio.wait(
+                {run_task, stop_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if run_task in done:
+                # Retrieve listener exceptions so asyncio does not emit an
+                # unhandled "Task exception was never retrieved" warning.
+                await run_task
+            elif stop_task in done:
+                await client.disconnect()
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
     except KeyboardInterrupt:
         print("\n\n👋 已停止")
-        await client.disconnect()
+        return True
     except Exception as e:
         print(f"\n❌ 錯誤: {e}")
+        return False
+    finally:
         await client.disconnect()
+
+    return True
 
 # ──────────── 主程式 ────────────
 

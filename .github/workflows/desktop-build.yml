@@ -1,0 +1,91 @@
+name: Desktop test builds
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - "feat/**"
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Python checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-desktop.txt
+      - name: Install dependencies
+        run: python -m pip install -r requirements-desktop.txt pytest
+      - name: Compile Python sources
+        run: python -m compileall -q teleshield.py desktop_app.py desktop_platform.py
+      - name: Run tests
+        run: python -m pytest -q
+
+  macos:
+    name: Build ${{ matrix.artifact_name }}
+    needs: tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            artifact_name: macOS-intel
+            file_name: macOS-intel.dmg
+          - runner: macos-14
+            artifact_name: macOS-arm
+            file_name: macOS-arm.dmg
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-desktop.txt
+      - name: Show runner architecture
+        run: uname -m
+      - name: Install desktop dependencies
+        run: python -m pip install -r requirements-desktop.txt
+      - name: Build application bundle
+        run: >-
+          python -m PyInstaller
+          --noconfirm
+          --clean
+          --windowed
+          --name TeleShield
+          desktop_app.py
+      - name: Report unpacked app size
+        run: |
+          du -sh "dist/TeleShield.app"
+          du -sh "dist/TeleShield.app/Contents/Frameworks" || true
+      - name: Create unsigned DMG
+        env:
+          ARTIFACT_NAME: ${{ matrix.artifact_name }}
+        run: |
+          mkdir -p "dist/dmg-root"
+          cp -R "dist/TeleShield.app" "dist/dmg-root/TeleShield.app"
+          ln -s /Applications "dist/dmg-root/Applications"
+          hdiutil create \
+            -volname "TeleShield ${ARTIFACT_NAME}" \
+            -srcfolder "dist/dmg-root" \
+            -ov \
+            -format UDZO \
+            "dist/${{ matrix.file_name }}"
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.file_name }}
+          if-no-files-found: error
+          retention-days: 14
