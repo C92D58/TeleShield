@@ -1163,17 +1163,14 @@ private struct EmptyPanel: View {
 
 struct MenuBarView: View {
     @ObservedObject var client: CoreClient
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("TeleShield").font(.headline)
             Text(client.connectionMessage).font(.caption).foregroundStyle(.secondary)
             Divider()
-            Button("開啟 TeleShield") {
-                NSApp.activate(ignoringOtherApps: true)
-                NSApp.windows.first { $0.isMiniaturized || !$0.isVisible }?.makeKeyAndOrderFront(nil)
-                NSApp.windows.first?.makeKeyAndOrderFront(nil)
-            }
+            Button("開啟 TeleShield") { openMainWindow() }
             if let account = client.selectedAccount, account.configured {
                 Button(account.running ? "停止防護" : "啟動防護") {
                     Task { if account.running { await client.stopProtection() } else { await client.startProtection() } }
@@ -1189,6 +1186,17 @@ struct MenuBarView: View {
         }
         .padding(12)
         .frame(width: 230)
+        .onReceive(NotificationCenter.default.publisher(for: .teleShieldOpenMainWindow)) { _ in
+            openMainWindow()
+        }
+    }
+
+    private func openMainWindow() {
+        openWindow(id: "main")
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.windows.first { $0.title == "TeleShield" }?.makeKeyAndOrderFront(nil)
+        }
     }
 }
 
@@ -1207,3 +1215,4 @@ private func savePanel(fileExtension: String, name: String) -> URL? {
     panel.allowedFileTypes = [fileExtension]
     return panel.runModal() == .OK ? panel.url : nil
 }
+
