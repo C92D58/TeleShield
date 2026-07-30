@@ -38,7 +38,11 @@ struct ContentView: View {
         NavigationSplitView {
             sidebar
         } detail: {
-            detailView
+            VStack(spacing: 0) {
+                CurrentAccountBar(client: client)
+                Divider()
+                detailView
+            }
         }
         .frame(minWidth: 1080, minHeight: 700)
         .onAppear { client.launch() }
@@ -65,7 +69,7 @@ struct ContentView: View {
 
     private var sidebar: some View {
         List(selection: $section) {
-            Section("目前帳號") {
+            Section("工作帳號") {
                 ForEach(client.status?.accounts ?? []) { account in
                     Button {
                         Task { await client.selectAccount(account.id) }
@@ -790,7 +794,6 @@ private struct AccountsView: View {
                 HStack(spacing: 12) {
                     AccountRow(account: account, selected: client.selectedAccount?.id == account.id)
                     Spacer()
-                    Text(account.state).font(.caption).foregroundStyle(.secondary)
                     Button(account.configured ? "重新登入" : "登入") {
                         Task { await client.selectAccount(account.id); showLogin = true }
                     }
@@ -940,17 +943,150 @@ private struct AccountRow: View {
     var body: some View {
         HStack(spacing: 9) {
             Image(systemName: account.configured ? "person.crop.circle.fill" : "person.crop.circle")
+                .font(.title3)
                 .foregroundStyle(selected ? .blue : .secondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(account.label).font(.body.weight(.medium))
                 Text(account.configured ? (account.phoneMasked.isEmpty ? account.username : account.phoneMasked) : "尚未登入")
                     .font(.caption).foregroundStyle(.secondary)
+                AccountStatusBadge(account: account)
             }
             Spacer()
-            if account.ready { Circle().fill(.green).frame(width: 8, height: 8) }
+            if selected {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.blue)
+                    .accessibilityLabel("目前使用中")
+            }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 7)
+        .padding(.horizontal, 8)
+        .background(selected ? Color.accentColor.opacity(0.13) : .clear, in: RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
+    }
+}
+
+private struct CurrentAccountBar: View {
+    @ObservedObject var client: CoreClient
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.left.arrow.right.circle.fill")
+                .font(.title3)
+                .foregroundStyle(.blue)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("目前工作帳號")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let account = client.selectedAccount {
+                    HStack(spacing: 7) {
+                        Text(account.label)
+                            .font(.body.weight(.semibold))
+                        AccountStatusBadge(account: account)
+                    }
+                } else {
+                    Text("尚未選取帳號")
+                        .font(.body.weight(.semibold))
+                }
+            }
+
+            Spacer()
+            AccountSwitcher(client: client)
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.bar)
+        .accessibilityElement(children: .contain)
+    }
+}
+
+private struct AccountSwitcher: View {
+    @ObservedObject var client: CoreClient
+
+    private var accounts: [AccountSummary] { client.status?.accounts ?? [] }
+    private var isSwitching: Bool { client.busyOperation == "切換帳號" }
+
+    var body: some View {
+        Menu {
+            if accounts.isEmpty {
+                Text("尚未建立 Telegram 帳號")
+            } else {
+                ForEach(accounts) { account in
+                    Button {
+                        guard account.id != client.selectedAccount?.id else { return }
+                        Task { await client.selectAccount(account.id) }
+                    } label: {
+                        Label {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(account.label)
+                                Text(account.accountIdentifier)
+                                    .font(.caption)
+                            }
+                        } icon: {
+                            Image(systemName: account.id == client.selectedAccount?.id ? "checkmark.circle.fill" : "person.crop.circle")
+                        }
+                    }
+                    .disabled(client.isBusy)
+                }
+            }
+        } label: {
+            HStack(spacing: 7) {
+                if isSwitching {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("切換中…")
+                } else {
+                    Image(systemName: "arrow.left.arrow.right")
+                    Text("切換帳號")
+                }
+                Image(systemName: "chevron.down")
+                    .font(.caption.weight(.bold))
+            }
+        }
+        .buttonStyle(.bordered)
+        .disabled(client.isBusy || accounts.isEmpty)
+        .help("切換目前工作帳號")
+        .accessibilityLabel(isSwitching ? "正在切換工作帳號" : "切換目前工作帳號")
+    }
+}
+
+private struct AccountStatusBadge: View {
+    let account: AccountSummary
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(account.statusColor)
+                .frame(width: 6, height: 6)
+            Text(account.statusLabel)
+        }
+        .font(.caption2.weight(.medium))
+        .foregroundStyle(account.statusColor)
+    }
+}
+
+private extension AccountSummary {
+    var accountIdentifier: String {
+        if !phoneMasked.isEmpty { return phoneMasked }
+        if !username.isEmpty { return "@\(username)" }
+        return "Telegram 帳號"
+    }
+
+    var statusLabel: String {
+        if !configured { return "未登入" }
+        if let error, !error.isEmpty { return "需要注意" }
+        if ready { return "防護中" }
+        if running { return "啟動中" }
+        return "已停止"
+    }
+
+    var statusColor: Color {
+        if !configured { return .secondary }
+        if let error, !error.isEmpty { return .red }
+        if ready { return .green }
+        if running { return .orange }
+        return .secondary
     }
 }
 
