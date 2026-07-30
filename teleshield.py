@@ -15,7 +15,7 @@ Telegram 廣告封鎖工具 — TeleShield 完整版
   --group-scan                                 掃描群組並踢除廣告
 """
 
-import asyncio, os, json, re, sys, time, tempfile, random
+import asyncio, csv, json, os, random, re, shutil, sys, tempfile, time
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -65,6 +65,24 @@ SPAM_PATTERNS = [
     r"limited\s*offer|discount\s*\d{2,}%|buy\s*now",
 ]
 
+DEFAULT_SCAN_SETTINGS = {
+    "private_dialog_limit": 30,
+    "private_message_limit": 5,
+    "private_days": 14,
+    "group_dialog_limit": 50,
+    "group_message_limit": 20,
+    "group_days": 3,
+}
+
+SCAN_SETTING_BOUNDS = {
+    "private_dialog_limit": (1, 100),
+    "private_message_limit": (1, 100),
+    "private_days": (1, 365),
+    "group_dialog_limit": (1, 100),
+    "group_message_limit": (1, 100),
+    "group_days": (1, 365),
+}
+
 # ──────────── 工具函式 ────────────
 
 def load_config():
@@ -104,6 +122,396 @@ def load_learned_patterns():
 def save_learned_patterns(data):
     SESSION_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     (SESSION_DIR / "learned_patterns.json").write_text(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def get_learned_patterns(cfg: dict = None) -> dict:
+    cfg = cfg if cfg is not None else load_config()
+    learned = cfg.get("learned_patterns", {})
+    return {
+        "keywords": list(learned.get("keywords", [])),
+        "patterns": list(learned.get("patterns", [])),
+    }
+
+
+def remove_learned_pattern(kind: str, value: str) -> bool:
+    if kind not in {"keywords", "patterns"}:
+        raise ValueError("kind 必須是 keywords 或 patterns")
+    cfg = load_config()
+    learned = get_learned_patterns(cfg)
+    if value not in learned[kind]:
+        return False
+    learned[kind].remove(value)
+    cfg["learned_patterns"] = learned
+    save_config(cfg)
+    return True
+
+
+def get_scan_settings(cfg: dict = None) -> dict:
+    """Return validated scan limits for both GUI and CLI callers."""
+    cfg = cfg if cfg is not None else load_config()
+    stored = cfg.get("scan_settings", {})
+    settings = {}
+    for key, default in DEFAULT_SCAN_SETTINGS.items():
+        low, high = SCAN_SETTING_BOUNDS[key]
+        try:
+            value = int(stored.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        settings[key] = max(low, min(high, value))
+    return settings
+
+
+def update_scan_settings(updates: dict) -> dict:
+    """Validate and persist user-editable scan limits."""
+    cfg = load_config()
+    settings = get_scan_settings(cfg)
+    for key, value in (updates or {}).items():
+        if key not in SCAN_SETTING_BOUNDS:
+            continue
+        low, high = SCAN_SETTING_BOUNDS[key]
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            continue
+        settings[key] = max(low, min(high, value))
+    cfg["scan_settings"] = settings
+    save_config(cfg)
+    return settings
+
+
+def learn_text(text: str) -> dict:
+    """Learn a user-supplied spam example without printing to stdout."""
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("請提供要學習的廣告文字")
+
+    cfg = load_config()
+    existing = cfg.get("learned_patterns", {})
+    learned = {
+        "keywords": list(existing.get("keywords", [])),
+        "patterns": list(existing.get("patterns", [])),
+    }
+
+    tokens = re.findall(r"[\u4e00-\u9fff]{2,6}", text)
+    stop_words = {
+        "我們", "他們", "可以", "沒有", "這個", "那個", "什麼", "因為", "所以", "但是",
+        "如果", "雖然", "然後", "而且", "或者", "不過", "還是", "就是", "不是", "一個",
+    }
+    added_keywords = []
+    for token in tokens:
+        if token not in stop_words and token not in learned["keywords"]:
+            learned["keywords"].append(token)
+            added_keywords.append(token)
+
+    added_patterns = []
+    match = re.search(r"(加微信|加\s*(?:V|v)|加|薇|威|wechat|line|whatsapp)[-:\s]*([a-zA-Z0-9_]{4,})", text)
+    if match:
+        pattern = re.escape(match.group(2))
+        if pattern not in learned["patterns"]:
+            learned["patterns"].append(pattern)
+            added_patterns.append(pattern)
+
+    for url in re.findall(r"https?://[^\s]{4,}", text):
+        pattern = re.escape(url[:20])
+        if pattern not in learned["patterns"]:
+            learned["patterns"].append(pattern)
+            added_patterns.append(pattern)
+
+    if not added_keywords and not added_patterns:
+        pattern = re.escape(text[:30])
+        if pattern not in learned["patterns"]:
+            learned["patterns"].append(pattern)
+            added_patterns.append(pattern)
+
+    cfg["learned_patterns"] = learned
+    save_config(cfg)
+    return {
+        "text": text,
+        "added_keywords": added_keywords,
+        "added_patterns": added_patterns,
+        "total_keywords": len(learned["keywords"]),
+        "total_patterns": len(learned["patterns"]),
+    }
+
+
+def _parse_log_time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def build_report(period: str = "day", now: datetime = None) -> dict:
+    """Return a structured report suitable for a GUI or an export."""
+    period = period if period in {"day", "week", "all"} else "day"
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if period == "day":
+        cutoff = now - timedelta(days=1)
+        label = "過去 24 小時"
+    elif period == "week":
+        cutoff = now - timedelta(days=7)
+        label = "過去 7 天"
+    else:
+        cutoff = datetime.min.replace(tzinfo=timezone.utc)
+        label = "全部記錄"
+
+    records = []
+    for record in load_block_log().get("blocks", []):
+        try:
+            record_time = _parse_log_time(record["time"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if record_time > cutoff:
+            records.append(dict(record))
+    records.sort(key=lambda item: item.get("time", ""), reverse=True)
+
+    by_source = defaultdict(int)
+    by_reason = defaultdict(int)
+    trend = defaultdict(int)
+    for record in records:
+        raw_source = record.get("source", "private")
+        source = "private" if raw_source == "scan" else raw_source
+        by_source[source] += 1
+        reason = record.get("reason", "")
+        by_reason[reason[:20] or "未分類"] += 1
+        trend[record.get("time", "")[:10]] += 1
+
+    return {
+        "period": period,
+        "label": label,
+        "total": len(records),
+        "by_source": dict(sorted(by_source.items())),
+        "by_reason": dict(sorted(by_reason.items(), key=lambda item: (-item[1], item[0]))[:5]),
+        "trend": dict(sorted(trend.items())),
+        "records": records,
+    }
+
+
+def get_block_records(query: str = "", source: str = "all", limit: int = 500) -> list:
+    """Filter persisted block records for the history table."""
+    query = (query or "").strip().lower()
+    source = source or "all"
+    records = []
+    for record in reversed(load_block_log().get("blocks", [])):
+        raw_source = record.get("source")
+        if source == "private":
+            matches_source = raw_source in {"private", "scan"}
+        else:
+            matches_source = source == "all" or raw_source == source
+        if not matches_source:
+            continue
+        haystack = " ".join(str(record.get(key, "")) for key in ("user_id", "name", "reason", "source"))
+        if query and query not in haystack.lower():
+            continue
+        records.append(dict(record))
+        if len(records) >= max(1, int(limit)):
+            break
+    return records
+
+
+def export_block_records(path: str, query: str = "", source: str = "all", fmt: str = "json") -> int:
+    """Export filtered block records as JSON or CSV; return row count."""
+    records = get_block_records(query, source)
+    output = Path(path).expanduser()
+    output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if fmt.lower() == "csv" or output.suffix.lower() == ".csv":
+        with output.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["time", "source", "user_id", "name", "reason"])
+            writer.writeheader()
+            writer.writerows({key: row.get(key, "") for key in writer.fieldnames} for row in records)
+    else:
+        output.write_text(json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        output.chmod(0o600)
+    except OSError:
+        pass
+    return len(records)
+
+
+def list_entries(list_type: str, query: str = "") -> list:
+    if list_type not in {"whitelist", "blacklist"}:
+        raise ValueError("list_type 必須是 whitelist 或 blacklist")
+    query = (query or "").strip().lower()
+    result = []
+    for user_id, info in sorted(load_config().get(list_type, {}).items()):
+        row = {
+            "user_id": str(user_id),
+            "username": info.get("username", ""),
+            "added": info.get("added", ""),
+            "reason": info.get("reason", ""),
+        }
+        if query and query not in " ".join(str(value) for value in row.values()).lower():
+            continue
+        result.append(row)
+    return result
+
+
+def upsert_list_entry(list_type: str, user_id: str, username: str = "", reason: str = "manual") -> dict:
+    if list_type not in {"whitelist", "blacklist"}:
+        raise ValueError("list_type 必須是 whitelist 或 blacklist")
+    user_id = str(user_id).strip()
+    if not user_id or not user_id.lstrip("-").isdigit():
+        raise ValueError("使用者 ID 必須是 numeric Telegram user ID")
+    cfg = load_config()
+    entries = cfg.setdefault(list_type, {})
+    previous = entries.get(user_id, {})
+    entries[user_id] = {
+        "added": previous.get("added") or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "username": (username or previous.get("username", "")).lstrip("@"),
+        "reason": reason or previous.get("reason", "manual"),
+    }
+    save_config(cfg)
+    return list_entries(list_type, user_id)[0]
+
+
+def remove_list_entry(list_type: str, user_id: str) -> bool:
+    if list_type not in {"whitelist", "blacklist"}:
+        raise ValueError("list_type 必須是 whitelist 或 blacklist")
+    cfg = load_config()
+    entries = cfg.setdefault(list_type, {})
+    existed = str(user_id) in entries
+    entries.pop(str(user_id), None)
+    if existed:
+        save_config(cfg)
+    return existed
+
+
+def export_list_entries(path: str, list_type: str, fmt: str = "") -> int:
+    rows = list_entries(list_type)
+    output = Path(path).expanduser()
+    output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if (fmt or output.suffix.lstrip(".")).lower() == "csv":
+        with output.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["user_id", "username", "added", "reason"])
+            writer.writeheader()
+            writer.writerows(rows)
+    else:
+        output.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        output.chmod(0o600)
+    except OSError:
+        pass
+    return len(rows)
+
+
+def import_list_entries(path: str, list_type: str, replace: bool = False) -> int:
+    if list_type not in {"whitelist", "blacklist"}:
+        raise ValueError("list_type 必須是 whitelist 或 blacklist")
+    source = Path(path).expanduser()
+    if source.suffix.lower() == ".csv":
+        with source.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+    else:
+        data = json.loads(source.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            rows = [dict(info, user_id=user_id) for user_id, info in data.items()]
+        else:
+            rows = data
+    cfg = load_config()
+    if replace:
+        cfg[list_type] = {}
+        save_config(cfg)
+    imported = 0
+    for row in rows:
+        try:
+            upsert_list_entry(list_type, row.get("user_id", ""), row.get("username", ""), row.get("reason", "import"))
+            imported += 1
+        except ValueError:
+            continue
+    return imported
+
+
+def merge_managed_groups(groups: list) -> list:
+    """Merge Telegram discovery results without resetting enable switches."""
+    cfg = load_config()
+    existing = {str(group.get("id")): dict(group) for group in cfg.get("managed_groups", [])}
+    seen = set()
+    merged = []
+    for group in groups or []:
+        group_id = str(group.get("id"))
+        if group_id in seen or group_id in {"None", ""}:
+            continue
+        seen.add(group_id)
+        old = existing.get(group_id, {})
+        merged.append({**old, **group, "id": group_id, "enabled": old.get("enabled", True)})
+    for group_id, old in existing.items():
+        if group_id not in seen:
+            merged.append(old)
+    cfg["managed_groups"] = merged
+    save_config(cfg)
+    return merged
+
+
+def set_managed_group_enabled(group_id: str, enabled: bool) -> bool:
+    cfg = load_config()
+    group_id = str(group_id)
+    groups = cfg.setdefault("managed_groups", [])
+    for group in groups:
+        if str(group.get("id")) == group_id:
+            group["enabled"] = bool(enabled)
+            save_config(cfg)
+            return True
+    groups.append({"id": group_id, "title": group_id, "username": "", "enabled": bool(enabled)})
+    save_config(cfg)
+    return True
+
+
+def is_group_enabled(group_id: str, cfg: dict = None) -> bool:
+    cfg = cfg if cfg is not None else load_config()
+    groups = cfg.get("managed_groups") or []
+    if not groups:
+        return bool(cfg.get("listen_scan_groups", True))
+    for group in groups:
+        if str(group.get("id")) == str(group_id):
+            return bool(group.get("enabled", True))
+    return False
+
+
+def clear_local_session(remove_credentials: bool = False) -> None:
+    """Delete local Telegram session and clear identity fields only."""
+    for path in (SESSION_FILE, Path(f"{SESSION_FILE}-journal")):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    cfg = load_config()
+    for key in ("phone", "user_id", "username", "last_scan"):
+        cfg.pop(key, None)
+    if remove_credentials:
+        cfg.pop("api_id", None)
+        cfg.pop("api_hash", None)
+    save_config(cfg)
+
+
+def find_tesseract() -> Optional[str]:
+    """Find a system or bundled Tesseract executable without exposing secrets."""
+    candidates = []
+    configured = os.getenv("TELESHIELD_TESSERACT_PATH")
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root:
+        bundle = Path(bundle_root)
+        candidates.extend([
+            bundle / "tesseract-runtime" / "bin" / "tesseract",
+            bundle / "tesseract-runtime" / "tesseract",
+            bundle / "tesseract",
+        ])
+    system_path = shutil.which("tesseract")
+    if system_path:
+        candidates.append(Path(system_path))
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def get_ocr_status() -> dict:
+    path = find_tesseract()
+    bundled = bool(path and getattr(sys, "_MEIPASS", None) and str(path).startswith(str(sys._MEIPASS)))
+    return {"available": bool(path), "bundled": bundled, "languages": ["chi_sim", "eng"] if path else []}
 
 def is_spam(text: str, cfg: dict = None) -> bool:
     """檢查文字是否包含廣告模式（含自訂模式）"""
@@ -147,195 +555,116 @@ def log_block(user_id: int, name: str, reason: str, source: str = "private"):
         log["blocks"] = log["blocks"][-500:]
     save_block_log(log)
 
-# ──────────── 圖片 OCR ────────────
-
 def ocr_image(image_path: str) -> str:
+    """Extract Chinese/English text when a system or bundled Tesseract exists."""
     try:
         from PIL import Image
         import pytesseract
+
+        tesseract_path = find_tesseract()
+        if not tesseract_path:
+            return ""
+        pytesseract.pytesseract.tesseract_cmd = tesseract_path
+        config = ""
+        bundle_root = getattr(sys, "_MEIPASS", None)
+        if bundle_root:
+            tessdata = Path(bundle_root) / "tesseract-runtime" / "share" / "tessdata"
+            if tessdata.is_dir():
+                config = f'--tessdata-dir "{tessdata}"'
         img = Image.open(image_path)
-        text = pytesseract.image_to_string(img, lang="chi_sim+eng")
+        text = pytesseract.image_to_string(img, lang="chi_sim+eng", config=config)
         return text.strip()
-    except Exception as e:
+    except Exception:
         return ""
+
 
 async def check_photo(client, msg) -> str:
     if not msg or not msg.photo:
         return ""
+    tmp = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
             tmp = f.name
         await client.download_media(msg, file=tmp)
-        text = ocr_image(tmp)
-        os.unlink(tmp)
-        return text
-    except:
+        return ocr_image(tmp)
+    except Exception:
         return ""
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 # ──────────── 學習模式 ────────────
 
 async def learn(text: str):
-    """手動標記廣告文字，自動提取關鍵字和模式"""
-    if not text:
-        print("❌ 請提供廣告文字")
+    """CLI wrapper around the GUI-safe learning API."""
+    try:
+        result = learn_text(text)
+    except ValueError as exc:
+        print(f"❌ {exc}")
         return
-
-    cfg = load_config()
-    lp = cfg.get("learned_patterns", {"keywords": [], "patterns": []})
-
-    # 提取有意義的關鍵詞（2-6 字，過濾常見字）
-    tokens = re.findall(r"[\u4e00-\u9fff]{2,6}", text)
-    stop_words = {"我們", "他們", "可以", "沒有", "這個", "那個", "什麼", "因為", "所以", "但是",
-                  "如果", "雖然", "然後", "而且", "或者", "不過", "還是", "就是", "不是", "一個"}
-    new_kws = []
-    for tok in tokens:
-        if tok not in stop_words and tok not in lp["keywords"]:
-            new_kws.append(tok)
-
-    # 提取可能的新 regex 模式
-    new_patterns = []
-    # 微信/Line/WhatsApp 類
-    m = re.search(r'(加|V|v|薇|威|wechat|line|whatsapp)[-:\s]*([a-zA-Z0-9_]{4,})', text)
-    if m:
-        pat = re.escape(m.group(2))
-        if pat not in lp["patterns"]:
-            new_patterns.append(pat)
-
-    # URL 短網址
-    urls = re.findall(r'https?://[^\s]{4,}', text)
-    for u in urls:
-        pat = re.escape(u[:20])
-        if pat not in lp["patterns"]:
-            new_patterns.append(pat)
-
-    if not new_kws and not new_patterns:
-        # 直接保存整句作為關鍵模式
-        phrase = re.escape(text[:30])
-        new_patterns.append(phrase)
-
-    lp["keywords"].extend(new_kws)
-    lp["patterns"].extend(new_patterns)
-    cfg["learned_patterns"] = lp
-    save_config(cfg)
-
-    print(f"✅ 已學習 {len(new_kws)} 個關鍵詞 + {len(new_patterns)} 個模式")
-    if new_kws:
-        print(f"   關鍵詞: {', '.join(new_kws)}")
-    if new_patterns:
-        print(f"   模式: {', '.join(new_patterns[:5])}")
-    print(f"   累計: {len(lp['keywords'])} 關鍵詞, {len(lp['patterns'])} 模式")
+    print(f"✅ 已學習 {len(result['added_keywords'])} 個關鍵詞 + {len(result['added_patterns'])} 個模式")
+    if result["added_keywords"]:
+        print(f"   關鍵詞: {', '.join(result['added_keywords'])}")
+    if result["added_patterns"]:
+        print(f"   模式: {', '.join(result['added_patterns'][:5])}")
+    print(f"   累計: {result['total_keywords']} 關鍵詞, {result['total_patterns']} 模式")
 
 # ──────────── 白名單/黑名單管理 ────────────
 
 async def manage_list(action: str, list_type: str, user_id_str: str = None):
-    """管理白名單或黑名單"""
-    cfg = load_config()
-    # Runtime checks use the canonical keys ``whitelist`` and ``blacklist``.
-    # Keep the CLI and desktop UI on the same schema.
-    key = list_type
-    lst = cfg.get(key, {})
-
-    if action == "list":
-        if not lst:
-            print(f"📋 {list_type} 名單: 空")
+    """CLI wrapper around the shared whitelist/blacklist API."""
+    try:
+        if action == "list":
+            rows = list_entries(list_type)
+            if not rows:
+                print(f"📋 {list_type} 名單: 空")
+            else:
+                print(f"📋 {list_type} 名單 ({len(rows)} 人):")
+                for row in rows:
+                    tag = f"@{row['username']}" if row["username"] else ""
+                    print(f"  • {row['user_id']} {tag} ({row['added'] or '?'})")
+            return
+        if not user_id_str:
+            print("❌ 請提供使用者 ID")
+            return
+        if action == "add":
+            upsert_list_entry(list_type, user_id_str, reason="manual")
+            print(f"✅ 已將 {user_id_str} 加入 {list_type} 名單")
+        elif action == "remove":
+            if remove_list_entry(list_type, user_id_str):
+                print(f"✅ 已將 {user_id_str} 從 {list_type} 名單移除")
+            else:
+                print(f"❌ {user_id_str} 不在 {list_type} 名單中")
         else:
-            print(f"📋 {list_type} 名單 ({len(lst)} 人):")
-            for uid, info in sorted(lst.items()):
-                tag = f"@{info.get('username','')}" if info.get('username') else ""
-                print(f"  • {uid} {tag} ({info.get('added','?')})")
-        return
-
-    if not user_id_str:
-        print(f"❌ 請提供使用者 ID")
-        return
-
-    user_id = user_id_str
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    if action == "add":
-        lst[user_id] = {"added": now, "username": "", "reason": "manual"}
-        cfg[key] = lst
-        save_config(cfg)
-        print(f"✅ 已將 {user_id} 加入 {list_type} 名單")
-    elif action == "remove":
-        if user_id in lst:
-            del lst[user_id]
-            cfg[key] = lst
-            save_config(cfg)
-            print(f"✅ 已將 {user_id} 從 {list_type} 名單移除")
-        else:
-            print(f"❌ {user_id} 不在 {list_type} 名單中")
-    else:
-        print(f"❌ 未知操作: {action}")
+            print(f"❌ 未知操作: {action}")
+    except ValueError as exc:
+        print(f"❌ {exc}")
 
 # ──────────── 封鎖摘要報告 ────────────
 
 async def report(period: str = "day"):
-    """生成封鎖摘要報告"""
-    log = load_block_log()
-    blocks = log.get("blocks", [])
-    if not blocks:
-        print("📊 尚無封鎖記錄")
+    """CLI wrapper around the shared structured report API."""
+    result = build_report(period)
+    if not result["total"]:
+        print(f"📊 {result['label']}: 無封鎖記錄")
         return
-
-    now = datetime.now(timezone.utc)
-    if period == "day":
-        cutoff = now - timedelta(days=1)
-        label = "過去 24 小時"
-    elif period == "week":
-        cutoff = now - timedelta(days=7)
-        label = "過去 7 天"
-    else:
-        cutoff = datetime.min.replace(tzinfo=timezone.utc)
-        label = "全部"
-
-    recent = [b for b in blocks if datetime.fromisoformat(b["time"]) > cutoff]
-
-    if not recent:
-        print(f"📊 {label}: 無封鎖記錄")
-        return
-
-    # 統計
-    total = len(recent)
-    sources = defaultdict(int)
-    reasons = defaultdict(int)
-    for b in recent:
-        sources[b.get("source", "private")] += 1
-        # 取廣告類型（reason 的第一個關鍵詞）
-        reason = b.get("reason", "")
-        for pat in SPAM_PATTERNS:
-            m = re.search(pat, reason)
-            if m:
-                tag = reason[:16] if len(reason) > 16 else reason
-                reasons[tag] += 1
-                break
-        else:
-            reasons[reason[:20]] += 1
-
-    print(f"\n📊 封鎖摘要 — {label}")
+    print(f"\n📊 封鎖摘要 — {result['label']}")
     print(f"{'─'*40}")
-    print(f"   總計封鎖: {total} 人")
-    print(f"")
-
-    if len(sources) > 1:
-        print(f"   來源:")
-        for s, c in sorted(sources.items(), key=lambda x: -x[1]):
-            label_s = "私訊" if s == "private" else "群組"
-            print(f"     • {label_s}: {c} 人")
-
-    print(f"   廣告類型 Top 5:")
-    for r, c in sorted(reasons.items(), key=lambda x: -x[1])[:5]:
-        print(f"     • {r}: {c} 次")
-
-    # 趨勢（每日）
+    print(f"   總計封鎖: {result['total']} 人")
+    if result["by_source"]:
+        print("   來源:")
+        for source, count in result["by_source"].items():
+            print(f"     • {'私訊' if source == 'private' else '群組'}: {count} 人")
+    print("   廣告類型 Top 5:")
+    for reason, count in result["by_reason"].items():
+        print(f"     • {reason}: {count} 次")
     if period == "week":
-        days = defaultdict(int)
-        for b in recent:
-            d = b["time"][:10]
-            days[d] += 1
-        print(f"\n   每日趨勢:")
-        for d in sorted(days.keys()):
-            print(f"     {d}: {days[d]} 人")
+        print("\n   每日趨勢:")
+        for day, count in result["trend"].items():
+            print(f"     {day}: {count} 人")
 
 # ──────────── 首次設定 ────────────
 
@@ -398,12 +727,77 @@ async def authenticate(
         cfg.setdefault("blacklist", {})
         cfg.setdefault("managed_groups", [])
         cfg.setdefault("learned_patterns", {"keywords": [], "patterns": []})
+        cfg.setdefault("scan_settings", DEFAULT_SCAN_SETTINGS.copy())
         cfg.setdefault("listen_scan_groups", True)
         cfg.setdefault("auto_start_protection", False)
         save_config(cfg)
         return me
     finally:
         await client.disconnect()
+
+
+async def discover_managed_groups() -> list:
+    """Fetch groups where the current account has moderation privileges."""
+    from telethon import TelegramClient
+    from telethon.tl.types import Chat, Channel
+
+    cfg = load_config()
+    if not cfg.get("api_id"):
+        raise RuntimeError("尚未登入 Telegram")
+    client = TelegramClient(str(SESSION_FILE), cfg["api_id"], cfg["api_hash"])
+    connected = False
+    try:
+        await client.connect()
+        connected = True
+        if not await client.is_user_authorized():
+            raise RuntimeError("Telegram Session 已失效，請先重新登入")
+        me = await client.get_me()
+        groups = []
+        for dialog in await client.get_dialogs(limit=100):
+            entity = dialog.entity
+            if not isinstance(entity, (Chat, Channel)) or getattr(entity, "broadcast", False):
+                continue
+            try:
+                permission = await client.get_permissions(entity, me.id)
+            except Exception:
+                continue
+            if not permission or not (permission.is_admin or permission.is_creator):
+                continue
+            groups.append({
+                "id": str(entity.id),
+                "title": getattr(entity, "title", "未命名群組"),
+                "username": getattr(entity, "username", "") or "",
+                "is_creator": bool(getattr(permission, "is_creator", False)),
+                "is_admin": bool(getattr(permission, "is_admin", False)),
+            })
+        return merge_managed_groups(groups)
+    finally:
+        if connected:
+            await client.disconnect()
+
+
+async def logout_account(remove_credentials: bool = False) -> bool:
+    """Log out the Telegram session and then clear local identity data."""
+    from telethon import TelegramClient
+
+    cfg = load_config()
+    if not cfg.get("api_id"):
+        clear_local_session(remove_credentials=remove_credentials)
+        return False
+    client = TelegramClient(str(SESSION_FILE), cfg["api_id"], cfg["api_hash"])
+    connected = False
+    logged_out = False
+    try:
+        await client.connect()
+        connected = True
+        if await client.is_user_authorized():
+            await client.log_out()
+            logged_out = True
+    finally:
+        if connected:
+            await client.disconnect()
+    clear_local_session(remove_credentials=remove_credentials)
+    return logged_out
 
 
 async def setup(api_id: str = None, api_hash: str = None, phone: str = None, code: str = None):
@@ -482,6 +876,7 @@ async def scan_history(
         "cancelled": False,
     }
     now = datetime.now(timezone.utc)
+    scan_settings = get_scan_settings(cfg)
 
     def cancelled() -> bool:
         return bool(cancel_event and cancel_event.is_set())
@@ -510,7 +905,7 @@ async def scan_history(
         contact_ids = {contact.id for contact in contacts}
 
         if scope == "private":
-            dialogs = await client.get_dialogs(limit=30)
+            dialogs = await client.get_dialogs(limit=scan_settings["private_dialog_limit"])
             total = len(dialogs)
             for index, dialog in enumerate(dialogs, 1):
                 result["dialogs_seen"] += 1
@@ -529,7 +924,7 @@ async def scan_history(
                 result["dialogs_scanned"] += 1
                 progress(f"掃描私訊 {index}/{total}…")
                 try:
-                    messages = await client.get_messages(entity, limit=5)
+                    messages = await client.get_messages(entity, limit=scan_settings["private_message_limit"])
                 except Exception as exc:
                     add_error(f"私訊讀取失敗（{entity.id}）：{exc}")
                     continue
@@ -541,7 +936,7 @@ async def scan_history(
                         break
                     if not message:
                         continue
-                    if message.date and message.date < now - timedelta(days=14):
+                    if message.date and message.date < now - timedelta(days=scan_settings["private_days"]):
                         continue
                     reason = message.text or ""
                     if not is_spam(reason, cfg) and message.photo:
@@ -572,12 +967,14 @@ async def scan_history(
                     break
         else:
             me = await client.get_me()
-            dialogs = await client.get_dialogs(limit=50)
+            dialogs = await client.get_dialogs(limit=scan_settings["group_dialog_limit"])
             groups = []
             for dialog in dialogs:
                 result["dialogs_seen"] += 1
                 entity = dialog.entity
                 if not isinstance(entity, (Chat, Channel)) or getattr(entity, "broadcast", False):
+                    continue
+                if not is_group_enabled(entity.id, cfg):
                     continue
                 try:
                     permissions = await client.get_permissions(entity, me.id)
@@ -597,7 +994,7 @@ async def scan_history(
                 title = getattr(entity, "title", "未知群組")
                 progress(f"掃描群組 {group_index}/{len(groups)}：{title}")
                 try:
-                    messages = await client.get_messages(entity, limit=20)
+                    messages = await client.get_messages(entity, limit=scan_settings["group_message_limit"])
                 except Exception as exc:
                     add_error(f"群組讀取失敗（{title}）：{exc}")
                     continue
@@ -615,7 +1012,7 @@ async def scan_history(
                         or is_whitelisted(message.sender_id, cfg)
                     ):
                         continue
-                    if message.date and message.date < now - timedelta(days=3):
+                    if message.date and message.date < now - timedelta(days=scan_settings["group_days"]):
                         continue
 
                     reason = message.text or ""
@@ -693,7 +1090,8 @@ async def scan_and_block(dry_run: bool = False):
         print(f"📇 聯絡人: {len(contact_ids)} 位")
 
         now = datetime.now(timezone.utc)
-        dialogs = await client.get_dialogs(limit=30)
+        scan_settings = get_scan_settings(cfg)
+        dialogs = await client.get_dialogs(limit=scan_settings["private_dialog_limit"])
 
         blocked = 0
         skipped = 0
@@ -704,7 +1102,7 @@ async def scan_and_block(dry_run: bool = False):
                 continue
 
             try:
-                msgs = await client.get_messages(entity, limit=5)
+                msgs = await client.get_messages(entity, limit=scan_settings["private_message_limit"])
             except:
                 continue
 
@@ -713,7 +1111,7 @@ async def scan_and_block(dry_run: bool = False):
             for msg in msgs:
                 if not msg:
                     continue
-                if msg.date and msg.date < now - timedelta(days=14):
+                if msg.date and msg.date < now - timedelta(days=scan_settings["private_days"]):
                     continue
                 msg_text = msg.text or ""
                 if is_spam(msg_text, cfg):
@@ -781,15 +1179,18 @@ async def scan_groups(dry_run: bool = False):
         await client.start(phone=cfg["phone"])
         me = await client.get_me()
         now = datetime.now(timezone.utc)
+        scan_settings = get_scan_settings(cfg)
 
         # 白名單聯絡人
         contacts = (await client(GetContactsRequest(hash=0))).users
         contact_ids = {c.id for c in contacts}
 
-        dialogs = await client.get_dialogs(limit=50)
+        dialogs = await client.get_dialogs(limit=scan_settings["group_dialog_limit"])
         groups = []
         for d in dialogs:
             if isinstance(d.entity, (Chat, Channel)) and not d.entity.broadcast:
+                if not is_group_enabled(d.entity.id, cfg):
+                    continue
                 # 檢查是否為管理員
                 try:
                     participant = await client.get_permissions(d.entity, me.id)
@@ -811,7 +1212,7 @@ async def scan_groups(dry_run: bool = False):
             entity = dialog.entity
             title = getattr(entity, "title", "未知群組")
             try:
-                msgs = await client.get_messages(entity, limit=20)
+                msgs = await client.get_messages(entity, limit=scan_settings["group_message_limit"])
             except:
                 continue
 
@@ -824,7 +1225,7 @@ async def scan_groups(dry_run: bool = False):
                     continue
                 if is_whitelisted(msg.sender_id, cfg):
                     continue
-                if msg.date and msg.date < now - timedelta(days=3):
+                if msg.date and msg.date < now - timedelta(days=scan_settings["group_days"]):
                     continue
 
                 # 檢測廣告
@@ -985,6 +1386,8 @@ async def listen(stop_event: Optional[asyncio.Event] = None, ready_callback=None
 
         # 群組處理
         if isinstance(chat, (Chat, Channel)) and not chat.broadcast:
+            if not is_group_enabled(chat.id, cfg):
+                return
             # 檢查是否為管理員
             try:
                 me = await client.get_me()

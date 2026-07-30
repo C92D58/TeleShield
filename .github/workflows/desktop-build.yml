@@ -55,8 +55,12 @@ jobs:
           cache-dependency-path: requirements-desktop.txt
       - name: Show runner architecture
         run: uname -m
+      - name: Install Tesseract runtime dependencies
+        run: brew install tesseract tesseract-lang dylibbundler
       - name: Install desktop dependencies
         run: python -m pip install -r requirements-desktop.txt
+      - name: Bundle Chinese/English Tesseract runtime
+        run: scripts/bundle_tesseract_macos.sh build/tesseract-runtime
       - name: Build application bundle
         run: >-
           python -m PyInstaller
@@ -64,7 +68,18 @@ jobs:
           --clean
           --windowed
           --name TeleShield
+          --add-data "build/tesseract-runtime:tesseract-runtime"
           desktop_app.py
+      - name: Verify bundled OCR runtime inside app
+        run: |
+          TESSERACT_BIN="$(find dist/TeleShield.app -type f -path '*/tesseract-runtime/bin/tesseract' -print -quit)"
+          CHI_SIM_DATA="$(find dist/TeleShield.app -type f -path '*/tesseract-runtime/share/tessdata/chi_sim.traineddata' -print -quit)"
+          ENG_DATA="$(find dist/TeleShield.app -type f -path '*/tesseract-runtime/share/tessdata/eng.traineddata' -print -quit)"
+          test -n "$TESSERACT_BIN"
+          test -n "$CHI_SIM_DATA"
+          test -n "$ENG_DATA"
+          chmod 755 "$TESSERACT_BIN"
+          TESSDATA_PREFIX="$(dirname "$CHI_SIM_DATA")" "$TESSERACT_BIN" --list-langs
       - name: Report unpacked app size
         run: |
           du -sh "dist/TeleShield.app"

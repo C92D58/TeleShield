@@ -8,19 +8,22 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 import threading
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Callable, Coroutine, Optional
 
 from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -33,14 +36,42 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSystemTrayIcon,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
     QInputDialog,
+    QHeaderView,
+    QSpinBox,
 )
 
 from desktop_platform import is_start_on_login_enabled, set_start_on_login
-from teleshield import authenticate, load_config, listen, save_config, scan_history
+from teleshield import (
+    authenticate,
+    build_report,
+    clear_local_session,
+    discover_managed_groups,
+    export_block_records,
+    export_list_entries,
+    get_block_records,
+    get_learned_patterns,
+    get_ocr_status,
+    get_scan_settings,
+    import_list_entries,
+    learn_text,
+    listen,
+    list_entries,
+    load_config,
+    logout_account,
+    remove_learned_pattern,
+    remove_list_entry,
+    save_config,
+    scan_history,
+    set_managed_group_enabled,
+    update_scan_settings,
+    upsert_list_entry,
+)
 
 
 class SetupWorker(QThread):
@@ -339,10 +370,18 @@ class HistoryScanDialog(QDialog):
         self.resize(650, 520)
         self.worker: Optional[HistoryScanWorker] = None
         self._closing = False
+        self.last_result: Optional[dict] = None
 
         self.scope_combo = QComboBox()
-        self.scope_combo.addItem("私訊（最近 30 個對話／14 天）", "private")
-        self.scope_combo.addItem("群組（管理員群組／最近 20 則／3 天）", "group")
+        scan_settings = get_scan_settings()
+        self.scope_combo.addItem(
+            f"私訊（{scan_settings['private_dialog_limit']} 對話／每個 {scan_settings['private_message_limit']} 則／{scan_settings['private_days']} 天）",
+            "private",
+        )
+        self.scope_combo.addItem(
+            f"群組（{scan_settings['group_dialog_limit']} 對話／每個 {scan_settings['group_message_limit']} 則／{scan_settings['group_days']} 天）",
+            "group",
+        )
         self.preview_checkbox = QCheckBox("試運行：只預覽，不封鎖／踢除（建議先使用）")
         self.preview_checkbox.setChecked(True)
         self.status_label = QLabel("預設為安全預覽；確認結果後可取消勾選再執行。")
@@ -350,6 +389,12 @@ class HistoryScanDialog(QDialog):
         self.progress_view = QTextEdit()
         self.progress_view.setReadOnly(True)
         self.progress_view.setPlaceholderText("掃描進度與結果會顯示在這裡。")
+        self.add_blacklist_button = QPushButton("將發現項目加入黑名單")
+        self.add_whitelist_button = QPushButton("將發現項目加入白名單")
+        self.add_blacklist_button.setEnabled(False)
+        self.add_whitelist_button.setEnabled(False)
+        self.add_blacklist_button.clicked.connect(lambda: self.add_findings_to_list("blacklist"))
+        self.add_whitelist_button.clicked.connect(lambda: self.add_findings_to_list("whitelist"))
 
         self.start_button = QPushButton("開始預覽")
         self.cancel_button = QPushButton("關閉")
@@ -364,12 +409,16 @@ class HistoryScanDialog(QDialog):
         form.addRow("執行模式", self.preview_checkbox)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
-            "歷史掃描只處理核心目前定義的近期範圍；掃描期間請先停止即時防護，"
+            "歷史掃描會使用「管理中心」中保存的範圍；掃描期間請先停止即時防護，"
             "避免同一個 Telegram Session 同時被兩個背景工作使用。"
         ))
         layout.addLayout(form)
         layout.addWidget(self.status_label)
         layout.addWidget(self.progress_view)
+        findings_actions = QHBoxLayout()
+        findings_actions.addWidget(self.add_blacklist_button)
+        findings_actions.addWidget(self.add_whitelist_button)
+        layout.addLayout(findings_actions)
         buttons = QHBoxLayout()
         buttons.addStretch()
         buttons.addWidget(self.start_button)
@@ -400,6 +449,9 @@ class HistoryScanDialog(QDialog):
         self.cancel_button.setText("停止掃描")
         self.cancel_button.setEnabled(True)
         self.progress_view.clear()
+        self.last_result = None
+        self.add_blacklist_button.setEnabled(False)
+        self.add_whitelist_button.setEnabled(False)
         self.status_label.setText("掃描中…")
         self.worker = HistoryScanWorker(scope, dry_run)
         self.worker.progress.connect(self.append_progress)
@@ -421,6 +473,10 @@ class HistoryScanDialog(QDialog):
 
     def scan_completed(self, result: dict) -> None:
         self._reset_controls()
+        self.last_result = result
+        has_findings = bool(result.get("findings"))
+        self.add_blacklist_button.setEnabled(has_findings)
+        self.add_whitelist_button.setEnabled(has_findings)
         summary = format_scan_result(result)
         self.progress_view.append("\n" + summary)
         self.status_label.setText("掃描完成" if not result.get("cancelled") else "掃描已取消")
@@ -433,6 +489,26 @@ class HistoryScanDialog(QDialog):
         self.progress_view.append(f"\n❌ 掃描失敗：{message}")
         if self._closing:
             self.reject()
+
+    def add_findings_to_list(self, list_type: str) -> None:
+        findings = (self.last_result or {}).get("findings", [])
+        user_ids = sorted({str(item.get("user_id")) for item in findings if item.get("user_id") is not None})
+        if not user_ids:
+            QMessageBox.information(self, "沒有可加入的項目", "這次掃描沒有可加入名單的使用者 ID。")
+            return
+        label = "黑名單" if list_type == "blacklist" else "白名單"
+        answer = QMessageBox.question(
+            self,
+            "確認加入名單",
+            f"確定要將 {len(user_ids)} 位發現的使用者加入{label}嗎？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        for user_id in user_ids:
+            upsert_list_entry(list_type, user_id, reason="history-scan")
+        self.progress_view.append(f"✅ 已將 {len(user_ids)} 位使用者加入{label}。")
 
     def cancel_or_close(self) -> None:
         if self.worker and self.worker.isRunning():
@@ -451,6 +527,600 @@ class HistoryScanDialog(QDialog):
             self.status_label.setText("正在停止掃描…")
             return
         super().reject()
+
+
+class TrendChartWidget(QWidget):
+    """Small dependency-free bar chart for the report tab."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.values = {}
+        self.setMinimumHeight(150)
+
+    def set_values(self, values: dict) -> None:
+        self.values = dict(values or {})
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#f8fafc"))
+        if not self.values:
+            painter.setPen(QColor("#64748b"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "這段期間沒有封鎖記錄")
+            painter.end()
+            return
+        width = max(1, self.width() - 40)
+        height = max(1, self.height() - 45)
+        maximum = max(self.values.values())
+        slot = width / max(1, len(self.values))
+        bar_width = max(8, int(slot * 0.62))
+        for index, (day, count) in enumerate(self.values.items()):
+            bar_height = int(height * count / maximum) if maximum else 0
+            x = 25 + int(index * slot + (slot - bar_width) / 2)
+            y = 12 + height - bar_height
+            painter.setBrush(QColor("#2563eb"))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRect(x, y, bar_width, bar_height)
+            painter.setPen(QColor("#334155"))
+            painter.drawText(x, y - 4, bar_width, 18, Qt.AlignmentFlag.AlignCenter, str(count))
+            painter.drawText(x - 10, 18 + height, bar_width + 20, 20, Qt.AlignmentFlag.AlignCenter, day[-5:])
+        painter.end()
+
+
+class AsyncOperationWorker(QThread):
+    """Run one Telethon coroutine without blocking the Qt event loop."""
+
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, operation: Callable[[], Coroutine[Any, Any, object]]):
+        super().__init__()
+        self.operation = operation
+
+    def run(self) -> None:
+        try:
+            self.completed.emit(asyncio.run(self.operation()))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ManagementDialog(QDialog):
+    """Management center for rules, reports, records, lists and account state."""
+
+    account_changed = Signal()
+
+    def __init__(self, parent: Optional[QWidget] = None, network_enabled: bool = True):
+        super().__init__(parent)
+        self.setWindowTitle("TeleShield 管理中心")
+        self.resize(980, 720)
+        self.network_enabled = network_enabled
+        self.group_worker: Optional[AsyncOperationWorker] = None
+        self.logout_worker: Optional[AsyncOperationWorker] = None
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._lists_tab(), "完整名單")
+        self.tabs.addTab(self._rules_tab(), "學習規則")
+        self.tabs.addTab(self._reports_tab(), "報告")
+        self.tabs.addTab(self._logs_tab(), "封鎖記錄")
+        self.tabs.addTab(self._groups_tab(), "群組管理")
+        self.tabs.addTab(self._settings_tab(), "掃描／OCR／帳號")
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.tabs)
+
+    @staticmethod
+    def _stretch_table(table: QTableWidget) -> None:
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+
+    def _lists_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        controls = QHBoxLayout()
+        self.list_type_combo = QComboBox()
+        self.list_type_combo.addItem("白名單", "whitelist")
+        self.list_type_combo.addItem("黑名單", "blacklist")
+        self.list_search = QLineEdit()
+        self.list_search.setPlaceholderText("搜尋 ID、username、原因…")
+        self.list_type_combo.currentIndexChanged.connect(self.refresh_lists)
+        self.list_search.textChanged.connect(self.refresh_lists)
+        controls.addWidget(QLabel("名單"))
+        controls.addWidget(self.list_type_combo)
+        controls.addWidget(self.list_search, 1)
+        refresh = QPushButton("重新整理")
+        refresh.clicked.connect(self.refresh_lists)
+        controls.addWidget(refresh)
+        layout.addLayout(controls)
+
+        self.list_table = QTableWidget(0, 4)
+        self.list_table.setHorizontalHeaderLabels(["User ID", "Username", "加入日期", "原因"])
+        self._stretch_table(self.list_table)
+        self.list_table.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
+        self.list_table.itemSelectionChanged.connect(self._populate_list_form)
+        layout.addWidget(self.list_table)
+
+        form = QFormLayout()
+        self.list_user_id = QLineEdit()
+        self.list_username = QLineEdit()
+        self.list_reason = QLineEdit("desktop")
+        form.addRow("User ID", self.list_user_id)
+        form.addRow("Username", self.list_username)
+        form.addRow("原因", self.list_reason)
+        layout.addLayout(form)
+        actions = QHBoxLayout()
+        add = QPushButton("新增／更新")
+        remove = QPushButton("移除選取項目")
+        batch_remove = QPushButton("批次移除選取")
+        import_button = QPushButton("匯入 JSON／CSV")
+        export_button = QPushButton("匯出 JSON／CSV")
+        add.clicked.connect(self.save_list_entry)
+        remove.clicked.connect(self.delete_list_entry)
+        batch_remove.clicked.connect(self.delete_selected_list_entries)
+        import_button.clicked.connect(self.import_lists)
+        export_button.clicked.connect(self.export_lists)
+        actions.addWidget(add)
+        actions.addWidget(remove)
+        actions.addWidget(batch_remove)
+        actions.addStretch()
+        actions.addWidget(import_button)
+        actions.addWidget(export_button)
+        layout.addLayout(actions)
+        self.refresh_lists()
+        return tab
+
+    def refresh_lists(self) -> None:
+        if not hasattr(self, "list_table"):
+            return
+        list_type = self.list_type_combo.currentData()
+        try:
+            rows = list_entries(list_type, self.list_search.text())
+        except Exception as exc:
+            QMessageBox.warning(self, "名單讀取失敗", str(exc))
+            return
+        self.list_table.setRowCount(0)
+        for row in rows:
+            index = self.list_table.rowCount()
+            self.list_table.insertRow(index)
+            for column, key in enumerate(("user_id", "username", "added", "reason")):
+                self.list_table.setItem(index, column, QTableWidgetItem(str(row.get(key, ""))))
+
+    def _populate_list_form(self) -> None:
+        row = self.list_table.currentRow()
+        if row < 0:
+            return
+        self.list_user_id.setText(self.list_table.item(row, 0).text())
+        self.list_username.setText(self.list_table.item(row, 1).text())
+        self.list_reason.setText(self.list_table.item(row, 3).text())
+
+    def save_list_entry(self) -> None:
+        try:
+            upsert_list_entry(
+                self.list_type_combo.currentData(),
+                self.list_user_id.text(),
+                self.list_username.text(),
+                self.list_reason.text(),
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "名單資料錯誤", str(exc))
+            return
+        self.refresh_lists()
+
+    def delete_list_entry(self) -> None:
+        selected_rows = sorted({index.row() for index in self.list_table.selectedIndexes()})
+        user_id = self.list_user_id.text().strip()
+        if len(selected_rows) == 1:
+            user_id = self.list_table.item(selected_rows[0], 0).text()
+        if not user_id:
+            QMessageBox.information(self, "尚未選取", "請先選取要移除的名單項目。")
+            return
+        removed = remove_list_entry(self.list_type_combo.currentData(), user_id)
+        if not removed:
+            QMessageBox.information(self, "找不到項目", "這個 ID 不在目前名單中。")
+        self.refresh_lists()
+
+    def delete_selected_list_entries(self) -> None:
+        user_ids = sorted({
+            self.list_table.item(row, 0).text()
+            for row in {index.row() for index in self.list_table.selectedIndexes()}
+            if self.list_table.item(row, 0)
+        })
+        if not user_ids:
+            QMessageBox.information(self, "尚未選取", "請先選取一個或多個名單項目。")
+            return
+        answer = QMessageBox.question(
+            self,
+            "確認批次移除",
+            f"確定要移除 {len(user_ids)} 筆名單項目嗎？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        list_type = self.list_type_combo.currentData()
+        for user_id in user_ids:
+            remove_list_entry(list_type, user_id)
+        self.refresh_lists()
+
+    def import_lists(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "匯入名單", "", "JSON／CSV (*.json *.csv)")
+        if not path:
+            return
+        try:
+            count = import_list_entries(path, self.list_type_combo.currentData(), replace=False)
+            self.refresh_lists()
+            QMessageBox.information(self, "匯入完成", f"已匯入 {count} 筆名單項目。")
+        except Exception as exc:
+            QMessageBox.critical(self, "匯入失敗", str(exc))
+
+    def export_lists(self) -> None:
+        list_type = self.list_type_combo.currentData()
+        path, _ = QFileDialog.getSaveFileName(self, "匯出名單", f"{list_type}.json", "JSON／CSV (*.json *.csv)")
+        if not path:
+            return
+        try:
+            count = export_list_entries(path, list_type)
+            QMessageBox.information(self, "匯出完成", f"已匯出 {count} 筆名單項目。")
+        except Exception as exc:
+            QMessageBox.critical(self, "匯出失敗", str(exc))
+
+    def _rules_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        hint = QLabel("貼上一則確定是廣告的訊息，核心會抽取關鍵詞／聯絡方式／網址模式。")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.learning_text = QTextEdit()
+        self.learning_text.setPlaceholderText("例如：加微信 spam_account，投資穩賺…")
+        layout.addWidget(self.learning_text)
+        learn_button = QPushButton("學習這則廣告")
+        learn_button.clicked.connect(self.learn_sample)
+        layout.addWidget(learn_button)
+        self.rules_table = QTableWidget(0, 2)
+        self.rules_table.setHorizontalHeaderLabels(["類型", "規則"])
+        self._stretch_table(self.rules_table)
+        layout.addWidget(self.rules_table)
+        remove = QPushButton("刪除選取規則")
+        remove.clicked.connect(self.delete_rule)
+        layout.addWidget(remove)
+        self.refresh_rules()
+        return tab
+
+    def refresh_rules(self) -> None:
+        if not hasattr(self, "rules_table"):
+            return
+        rules = get_learned_patterns()
+        self.rules_table.setRowCount(0)
+        for kind, label in (("keywords", "關鍵詞"), ("patterns", "正則／模式")):
+            for value in rules[kind]:
+                row = self.rules_table.rowCount()
+                self.rules_table.insertRow(row)
+                self.rules_table.setItem(row, 0, QTableWidgetItem(label))
+                self.rules_table.setItem(row, 1, QTableWidgetItem(value))
+
+    def learn_sample(self) -> None:
+        try:
+            result = learn_text(self.learning_text.toPlainText())
+        except ValueError as exc:
+            QMessageBox.warning(self, "學習失敗", str(exc))
+            return
+        self.learning_text.clear()
+        self.refresh_rules()
+        QMessageBox.information(
+            self,
+            "學習完成",
+            f"新增關鍵詞 {len(result['added_keywords'])} 個、模式 {len(result['added_patterns'])} 個。",
+        )
+
+    def delete_rule(self) -> None:
+        row = self.rules_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "尚未選取", "請先選取要刪除的規則。")
+            return
+        kind = "keywords" if self.rules_table.item(row, 0).text() == "關鍵詞" else "patterns"
+        value = self.rules_table.item(row, 1).text()
+        remove_learned_pattern(kind, value)
+        self.refresh_rules()
+
+    def _reports_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        controls = QHBoxLayout()
+        self.report_period = QComboBox()
+        self.report_period.addItem("過去 24 小時", "day")
+        self.report_period.addItem("過去 7 天", "week")
+        self.report_period.addItem("全部記錄", "all")
+        refresh = QPushButton("重新產生")
+        export = QPushButton("匯出 JSON")
+        refresh.clicked.connect(self.refresh_report)
+        export.clicked.connect(self.export_report)
+        controls.addWidget(QLabel("期間"))
+        controls.addWidget(self.report_period)
+        controls.addWidget(refresh)
+        controls.addWidget(export)
+        controls.addStretch()
+        layout.addLayout(controls)
+        self.report_view = QTextEdit()
+        self.report_view.setReadOnly(True)
+        layout.addWidget(self.report_view)
+        self.report_chart = TrendChartWidget()
+        layout.addWidget(self.report_chart)
+        self.report_period.currentIndexChanged.connect(self.refresh_report)
+        self.refresh_report()
+        return tab
+
+    def refresh_report(self) -> None:
+        if not hasattr(self, "report_view"):
+            return
+        result = build_report(self.report_period.currentData())
+        lines = [
+            f"{result['label']}：共 {result['total']} 筆處理記錄",
+            "",
+            "來源：" + ("、".join(f"{key} {value}" for key, value in result["by_source"].items()) or "無"),
+            "熱門原因：" + ("、".join(f"{key} ({value})" for key, value in result["by_reason"].items()) or "無"),
+            "",
+            "每日趨勢：",
+        ]
+        lines.extend(f"  {day}: {count}" for day, count in result["trend"].items())
+        self.report_view.setPlainText("\n".join(lines))
+        self.report_chart.set_values(result["trend"])
+
+    def export_report(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "匯出報告", "teleshield-report.json", "JSON (*.json)")
+        if not path:
+            return
+        result = build_report(self.report_period.currentData())
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(result, handle, indent=2, ensure_ascii=False)
+            QMessageBox.information(self, "匯出完成", "報告已匯出。")
+        except OSError as exc:
+            QMessageBox.critical(self, "匯出失敗", str(exc))
+
+    def _logs_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        controls = QHBoxLayout()
+        self.log_search = QLineEdit()
+        self.log_search.setPlaceholderText("搜尋名稱、ID、原因…")
+        self.log_source = QComboBox()
+        self.log_source.addItem("全部來源", "all")
+        self.log_source.addItem("私訊", "private")
+        self.log_source.addItem("群組", "group")
+        refresh = QPushButton("重新整理")
+        export_json = QPushButton("匯出 JSON")
+        export_csv = QPushButton("匯出 CSV")
+        refresh.clicked.connect(self.refresh_logs)
+        export_json.clicked.connect(lambda: self.export_logs("json"))
+        export_csv.clicked.connect(lambda: self.export_logs("csv"))
+        self.log_search.textChanged.connect(self.refresh_logs)
+        self.log_source.currentIndexChanged.connect(self.refresh_logs)
+        controls.addWidget(self.log_search, 1)
+        controls.addWidget(self.log_source)
+        controls.addWidget(refresh)
+        controls.addWidget(export_json)
+        controls.addWidget(export_csv)
+        layout.addLayout(controls)
+        self.log_table = QTableWidget(0, 5)
+        self.log_table.setHorizontalHeaderLabels(["時間", "來源", "User ID", "名稱", "原因"])
+        self._stretch_table(self.log_table)
+        layout.addWidget(self.log_table)
+        self.refresh_logs()
+        return tab
+
+    def refresh_logs(self) -> None:
+        if not hasattr(self, "log_table"):
+            return
+        rows = get_block_records(self.log_search.text(), self.log_source.currentData())
+        self.log_table.setRowCount(0)
+        for record in rows:
+            row = self.log_table.rowCount()
+            self.log_table.insertRow(row)
+            values = [record.get("time", ""), record.get("source", ""), record.get("user_id", ""), record.get("name", ""), record.get("reason", "")]
+            for column, value in enumerate(values):
+                self.log_table.setItem(row, column, QTableWidgetItem(str(value)))
+
+    def export_logs(self, fmt: str) -> None:
+        suffix = "csv" if fmt == "csv" else "json"
+        path, _ = QFileDialog.getSaveFileName(self, "匯出封鎖記錄", f"teleshield-block-log.{suffix}", f"{suffix.upper()} (*.{suffix})")
+        if not path:
+            return
+        try:
+            count = export_block_records(path, self.log_search.text(), self.log_source.currentData(), fmt)
+            QMessageBox.information(self, "匯出完成", f"已匯出 {count} 筆封鎖記錄。")
+        except Exception as exc:
+            QMessageBox.critical(self, "匯出失敗", str(exc))
+
+    def _groups_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        self.group_hint = QLabel(
+            "只列出目前帳號有管理權限的群組；停用個別群組後，即時防護與歷史群組掃描都會跳過它。"
+        )
+        self.group_hint.setWordWrap(True)
+        layout.addWidget(self.group_hint)
+        actions = QHBoxLayout()
+        self.discover_groups_button = QPushButton("從 Telegram 重新讀取")
+        toggle = QPushButton("切換選取群組")
+        self.discover_groups_button.clicked.connect(self.discover_groups)
+        toggle.clicked.connect(self.toggle_group)
+        actions.addWidget(self.discover_groups_button)
+        actions.addWidget(toggle)
+        actions.addStretch()
+        layout.addLayout(actions)
+        self.group_table = QTableWidget(0, 5)
+        self.group_table.setHorizontalHeaderLabels(["群組", "Username", "ID", "權限", "狀態"])
+        self._stretch_table(self.group_table)
+        layout.addWidget(self.group_table)
+        if not self.network_enabled:
+            self.discover_groups_button.setEnabled(False)
+            self.group_hint.setText("即時防護正在使用 Telegram Session；請先停止防護，再重新讀取群組。")
+        self.refresh_groups()
+        return tab
+
+    def refresh_groups(self) -> None:
+        if not hasattr(self, "group_table"):
+            return
+        groups = load_config().get("managed_groups", [])
+        self.group_table.setRowCount(0)
+        for group in groups:
+            row = self.group_table.rowCount()
+            self.group_table.insertRow(row)
+            values = [
+                group.get("title", ""),
+                f"@{group.get('username')}" if group.get("username") else "",
+                group.get("id", ""),
+                "創建者" if group.get("is_creator") else "管理員",
+                "啟用" if group.get("enabled", True) else "停用",
+            ]
+            for column, value in enumerate(values):
+                self.group_table.setItem(row, column, QTableWidgetItem(str(value)))
+
+    def discover_groups(self) -> None:
+        if self.group_worker and self.group_worker.isRunning():
+            return
+        self.discover_groups_button.setEnabled(False)
+        self.group_hint.setText("正在讀取群組與管理員權限…")
+        self.group_worker = AsyncOperationWorker(discover_managed_groups)
+        self.group_worker.completed.connect(self.groups_discovered)
+        self.group_worker.failed.connect(self.groups_failed)
+        self.group_worker.start()
+
+    def groups_discovered(self, groups: object) -> None:
+        self.discover_groups_button.setEnabled(self.network_enabled)
+        self.refresh_groups()
+        self.group_hint.setText(f"已讀取 {len(groups) if isinstance(groups, list) else 0} 個可管理群組。")
+
+    def groups_failed(self, message: str) -> None:
+        self.discover_groups_button.setEnabled(self.network_enabled)
+        self.group_hint.setText("群組讀取失敗")
+        QMessageBox.warning(self, "群組讀取失敗", message)
+
+    def toggle_group(self) -> None:
+        row = self.group_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "尚未選取", "請先選取一個群組。")
+            return
+        group_id = self.group_table.item(row, 2).text()
+        currently_enabled = self.group_table.item(row, 4).text() == "啟用"
+        set_managed_group_enabled(group_id, not currently_enabled)
+        self.refresh_groups()
+
+    def _settings_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        scan_box = QGroupBox("歷史掃描範圍")
+        scan_form = QFormLayout(scan_box)
+        self.scan_spins = {}
+        labels = {
+            "private_dialog_limit": "私訊對話數上限",
+            "private_message_limit": "每個私訊最多幾則",
+            "private_days": "私訊最近幾天",
+            "group_dialog_limit": "群組對話數上限",
+            "group_message_limit": "每個群組最多幾則",
+            "group_days": "群組最近幾天",
+        }
+        settings = get_scan_settings()
+        for key, label in labels.items():
+            spin = QSpinBox()
+            spin.setRange(1, 365 if key.endswith("days") else 100)
+            spin.setValue(settings[key])
+            self.scan_spins[key] = spin
+            scan_form.addRow(label, spin)
+        save_scan_button = QPushButton("儲存掃描設定")
+        save_scan_button.clicked.connect(self.save_scan_settings)
+        scan_form.addRow(save_scan_button)
+        layout.addWidget(scan_box)
+
+        ocr_box = QGroupBox("圖片 OCR")
+        ocr_layout = QHBoxLayout(ocr_box)
+        self.ocr_status_label = QLabel()
+        ocr_refresh = QPushButton("重新檢查")
+        ocr_refresh.clicked.connect(self.refresh_ocr_status)
+        ocr_layout.addWidget(self.ocr_status_label, 1)
+        ocr_layout.addWidget(ocr_refresh)
+        layout.addWidget(ocr_box)
+        self.refresh_ocr_status()
+
+        account_box = QGroupBox("Telegram 帳號／Session")
+        account_layout = QVBoxLayout(account_box)
+        account_layout.addWidget(QLabel("登出會撤銷 Telegram Session；刪除本機 Session 不會輸出任何驗證碼或密碼。"))
+        account_actions = QHBoxLayout()
+        self.logout_button = QPushButton("登出 Telegram（保留 API 設定）")
+        clear_session = QPushButton("只刪除本機 Session")
+        clear_all = QPushButton("刪除 Session 與 API 設定")
+        self.logout_button.clicked.connect(lambda: self.logout(False))
+        clear_session.clicked.connect(lambda: self.clear_local(False))
+        clear_all.clicked.connect(lambda: self.clear_local(True))
+        account_actions.addWidget(self.logout_button)
+        account_actions.addWidget(clear_session)
+        account_actions.addWidget(clear_all)
+        account_layout.addLayout(account_actions)
+        layout.addWidget(account_box)
+        if not self.network_enabled:
+            self.logout_button.setEnabled(False)
+            clear_session.setEnabled(False)
+            clear_all.setEnabled(False)
+        layout.addStretch()
+        return tab
+
+    def save_scan_settings(self) -> None:
+        update_scan_settings({key: spin.value() for key, spin in self.scan_spins.items()})
+        QMessageBox.information(self, "設定已儲存", "歷史掃描設定已更新。")
+
+    def refresh_ocr_status(self) -> None:
+        status = get_ocr_status()
+        if status["available"] and status["bundled"]:
+            text = "✅ OCR 可用（已使用應用程式內建 Tesseract，中文／英文）"
+        elif status["available"]:
+            text = "✅ OCR 可用（使用系統 Tesseract；中文語言包請自行確認）"
+        else:
+            text = "⚠️ 找不到 Tesseract；圖片廣告辨識目前停用，文字廣告仍可正常處理。"
+        self.ocr_status_label.setText(text)
+        self.ocr_status_label.setWordWrap(True)
+
+    def logout(self, remove_credentials: bool) -> None:
+        if self.logout_worker and self.logout_worker.isRunning():
+            return
+        answer = QMessageBox.question(
+            self,
+            "確認登出",
+            "這會讓目前 Telegram Session 登出，確定要繼續嗎？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.logout_button.setEnabled(False)
+        self.logout_worker = AsyncOperationWorker(lambda: logout_account(remove_credentials))
+        self.logout_worker.completed.connect(self.logout_completed)
+        self.logout_worker.failed.connect(self.logout_failed)
+        self.logout_worker.start()
+
+    def logout_completed(self, logged_out: object) -> None:
+        self.logout_button.setEnabled(False if not self.network_enabled else True)
+        self.account_changed.emit()
+        QMessageBox.information(self, "登出完成", "Telegram Session 已清除；請重新登入以恢復防護。")
+
+    def logout_failed(self, message: str) -> None:
+        self.logout_button.setEnabled(self.network_enabled)
+        QMessageBox.critical(self, "登出失敗", message)
+
+    def clear_local(self, remove_credentials: bool) -> None:
+        label = "Session 與 API 設定" if remove_credentials else "本機 Session"
+        answer = QMessageBox.question(
+            self,
+            "確認刪除",
+            f"確定要刪除{label}嗎？這不會刪除 Telegram 雲端帳號。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        clear_local_session(remove_credentials=remove_credentials)
+        self.account_changed.emit()
+        QMessageBox.information(self, "已刪除", f"{label}已從本機移除。")
 
 
 class MainWindow(QMainWindow):
@@ -503,14 +1173,17 @@ class MainWindow(QMainWindow):
         self.start_button = QPushButton("開始防護")
         self.stop_button = QPushButton("停止防護")
         self.history_scan_button = QPushButton("掃描既有訊息")
+        self.management_button = QPushButton("管理中心")
         self.start_button.clicked.connect(self.start_protection)
         self.stop_button.clicked.connect(self.stop_protection)
         self.setup_button.clicked.connect(self.open_setup)
         self.history_scan_button.clicked.connect(self.open_history_scan)
+        self.management_button.clicked.connect(self.open_management)
         actions.addWidget(self.setup_button)
         actions.addWidget(self.start_button)
         actions.addWidget(self.stop_button)
         actions.addWidget(self.history_scan_button)
+        actions.addWidget(self.management_button)
         layout.addLayout(actions)
 
         tabs = QTabWidget()
@@ -648,6 +1321,12 @@ class MainWindow(QMainWindow):
             self.refresh_status()
             self.log_view.append("✅ Telegram 登入設定完成")
 
+    def open_management(self) -> None:
+        dialog = ManagementDialog(self, network_enabled=not bool(self.listener and self.listener.isRunning()))
+        dialog.account_changed.connect(self.refresh_status)
+        dialog.exec()
+        self.refresh_status()
+
     def start_protection(self) -> None:
         if self.listener and self.listener.isRunning():
             return
@@ -703,19 +1382,16 @@ class MainWindow(QMainWindow):
         if not user_id or not user_id.lstrip("-").isdigit():
             QMessageBox.warning(self, "使用者 ID 錯誤", "請輸入 numeric Telegram user ID。")
             return
-        cfg = load_config()
-        entries = cfg.setdefault(list_type, {})
-        if action == "add":
-            entries[user_id] = {
-                "added": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                "username": "",
-                "reason": "desktop",
-            }
-            self.log_view.append(f"✅ 已加入 {list_type}: {user_id}")
-        else:
-            entries.pop(user_id, None)
-            self.log_view.append(f"✅ 已從 {list_type} 移除: {user_id}")
-        save_config(cfg)
+        try:
+            if action == "add":
+                upsert_list_entry(list_type, user_id, reason="desktop")
+                self.log_view.append(f"✅ 已加入 {list_type}: {user_id}")
+            else:
+                remove_list_entry(list_type, user_id)
+                self.log_view.append(f"✅ 已從 {list_type} 移除: {user_id}")
+        except ValueError as exc:
+            QMessageBox.warning(self, "名單更新失敗", str(exc))
+            return
         self.user_id_edit.clear()
         self.refresh_status()
 
