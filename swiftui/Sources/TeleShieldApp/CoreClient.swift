@@ -139,6 +139,10 @@ final class CoreClient: ObservableObject {
 
     func selectAccount(_ accountID: String) async {
         await runBusy("切換帳號") {
+            // Do not show the previous account's report or block records while
+            // the new account is being loaded.
+            self.report = nil
+            self.blockRecords = []
             _ = try await self.request(method: "select_account", params: ["account_id": .string(accountID)])
             await self.refresh()
         }
@@ -361,10 +365,16 @@ final class CoreClient: ObservableObject {
 
     func buildReport(period: String) async {
         do {
-            var params = accountParams() ?? [:]
+            guard let accountID = selectedAccountID, !accountID.isEmpty else {
+                report = nil
+                return
+            }
+            var params = ["account_id": JSONValue.string(accountID)]
             params["period"] = .string(period)
             let data = try await request(method: "build_report", params: params)
-            report = try decodeResult(Report.self, from: data)
+            let nextReport = try decodeResult(Report.self, from: data)
+            guard selectedAccountID == accountID else { return }
+            report = nextReport
         } catch { present(error: error) }
     }
 
@@ -379,12 +389,18 @@ final class CoreClient: ObservableObject {
 
     func fetchBlockRecords(query: String = "", source: String = "all") async {
         do {
-            var params = accountParams() ?? [:]
+            guard let accountID = selectedAccountID, !accountID.isEmpty else {
+                blockRecords = []
+                return
+            }
+            var params = ["account_id": JSONValue.string(accountID)]
             params["query"] = .string(query)
             params["source"] = .string(source)
             params["limit"] = .int(500)
             let data = try await request(method: "get_block_records", params: params)
-            blockRecords = try decodeResult([BlockRecord].self, from: data)
+            let nextRecords = try decodeResult([BlockRecord].self, from: data)
+            guard selectedAccountID == accountID else { return }
+            blockRecords = nextRecords
         } catch { present(error: error) }
     }
 

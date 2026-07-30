@@ -572,7 +572,7 @@ private struct ReportView: View {
             }
             .padding(28)
         }
-        .task { await client.buildReport(period: period) }
+        .task(id: client.selectedAccountID) { await client.buildReport(period: period) }
     }
 
     private func exportReport() {
@@ -657,7 +657,7 @@ private struct BlockRecordsView: View {
             .listStyle(.inset)
         }
         .padding(28)
-        .task { await client.fetchBlockRecords(query: query, source: source) }
+        .task(id: client.selectedAccountID) { await client.fetchBlockRecords(query: query, source: source) }
     }
 
     private func export(_ format: String) {
