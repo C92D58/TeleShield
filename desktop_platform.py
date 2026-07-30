@@ -15,6 +15,8 @@ STARTUP_NAME = "TeleShield"
 
 def application_command() -> list[str]:
     """Return the command used by the OS to relaunch the desktop app."""
+    if sys.platform == "darwin" and os.getenv("TELESHIELD_STARTUP_APP"):
+        return ["/usr/bin/open", "-a", os.environ["TELESHIELD_STARTUP_APP"], "--args", "--background"]
     if getattr(sys, "frozen", False):
         return [sys.executable, "--background"]
     app_path = Path(__file__).resolve().with_name("desktop_app.py")

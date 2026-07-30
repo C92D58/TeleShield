@@ -1,0 +1,4 @@
+-r requirements.txt
+Pillow>=10,<13
+pytesseract>=0.3.13,<1
+pyinstaller>=6.10,<7

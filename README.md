@@ -1,350 +1,358 @@
-<div align="center">
-  <h1>🛡️ TeleShield</h1>
-  <p><strong>Telegram 全能廣告封鎖守衛</strong><br>
-  <em>Your personal Telegram spam firewall — private messages & group management, all in one.</em></p>
+> ## 致上游原作者 / Credit to the upstream author
+>
+> 本專案是從 [WAHSUN 的 TeleShield](https://github.com/c92d58/TeleShield) fork 出來的延伸工作。感謝原作者建立 Telegram 個人帳號防護、私訊封鎖、群組管理、OCR、學習規則與報告等核心功能；這個 fork 不取代、不重新宣稱上游原作的著作權，也不代表上游作者背書本 fork 的改動。
+>
+> Original work, design, and domain logic belong to the upstream TeleShield project and its author. This repository adds downstream desktop integration and macOS SwiftUI work while preserving the upstream attribution and MIT license.
 
+<div align="center">
+  <h1>🛡️ TeleShield-UI</h1>
+  <p><strong>TeleShield 的桌面 UI 與 macOS SwiftUI fork</strong><br>
+  <em>A desktop UI fork of TeleShield with a native SwiftUI shell and a Python/Telethon sidecar.</em></p>
   <p>
-    <img src="https://img.shields.io/badge/python-3.9%2B-blue" alt="Python">
-    <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-    <img src="https://img.shields.io/badge/telethon-1.44%2B-purple" alt="Telethon">
-    <img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2Fc92d58%2FTeleShield%2Freleases%2Flatest&query=%24.tag_name&label=release&color=22C55E" alt="Release">
-  </p>
-  <p>
-    <a href="https://teleshield.wahsun.org">🌐 產品頁面</a>
-    ·
-    <a href="https://github.com/c92d58/TeleShield/releases/latest">📦 下載</a>
-    ·
-    <a href="https://github.com/c92d58/TeleShield#-快速開始--quick-start">🚀 快速開始</a>
+    <a href="https://github.com/c92d58/TeleShield">上游原作</a> ·
+    <a href="https://github.com/caryyu0306/TeleShield-UI">本 fork</a> ·
+    <a href="LICENSE">MIT License</a>
   </p>
 </div>
 
 ---
 
-## 📋 概述 / Overview
+## 專案定位 / Project status
 
-**TeleShield** 是一個全功能的 Telegram 廣告防禦工具，涵蓋 **個人私訊封鎖** 與 **群組踢除** 兩大場景。不同於 Bot API，它直接以你的身份登入，能處理 Bot 做不到的個人帳號防護。
+這個 repository 同時保留兩條桌面路徑：
 
-*TeleShield is a full-featured Telegram spam defense system covering **private DM blocking** and **group moderation**. It logs in as you — something Bot API bots cannot do.*
+1. **既有跨平台路徑**：`desktop_app.py` 使用 PySide6，保留原本的 Python/Telethon 工作流。
+2. **macOS SwiftUI 路徑**：`swiftui/` 提供原生 SwiftUI 畫面，Telegram 業務邏輯仍由不含 PySide6 的 Python sidecar 執行。
+
+本 fork 的目標是讓既有 TeleShield 核心可以被桌面 UI 使用，而不是把 Telethon 核心重寫成 Swift。Python CLI 與 PySide6 路徑仍應維持向後相容。
+
+> **目前狀態：測試版，不是正式 release。** macOS DMG 由 GitHub Actions 產生，現階段為 unsigned artifact，未完成 Apple Developer code signing、notarization 或 stapling。Gatekeeper 顯示開發者無法驗證時，並不代表 ARM／Intel 架構錯誤。
+
+### 尚未宣稱已完成的驗證
+
+以下項目不能只因 Python tests、sidecar self-test 或 DMG 產生成功就視為完整驗證：
+
+- 真實 Telegram network login、驗證碼、2FA 與 session 到期流程
+- 實體 macOS 上的完整 SwiftUI 手動操作驗收
+- 即時防護、歷史掃描、群組踢除與 OCR 的真實帳號整合
+- 正式簽章、notarization、stapling 與公開發布
 
 ---
 
-## 🖥️ Desktop App（測試版）
+## 功能概覽 / Features
 
-本 fork 正在把 TeleShield 包裝成一般使用者可以直接安裝的桌面應用程式：
+### 既有 TeleShield 核心
 
-- PySide6 GUI，不需要使用者執行 CLI
-- Telegram 個人帳號登入流程
-- 關閉主視窗只會隱藏到系統匣，背景防護仍然執行
-- 系統匣選單可重新開啟、開始／停止防護或真正結束程式
-- 可選擇登入作業系統時自動啟動，並自動開始防護
-- 可從 GUI 掃描近期既有私訊或管理員群組訊息
-- 歷史掃描預設為 dry-run 預覽；實際封鎖／踢除前會要求明確確認
-- 歷史掃描在背景工作執行，可查看進度並停止掃描
-- 「管理中心」提供完整白／黑名單、學習規則、報告圖表、封鎖記錄與群組設定
-- 可在管理中心自訂歷史掃描對話數、訊息數與日期範圍
-- 可在管理中心登出、刪除本機 Session 或切換 Telegram 帳號
-- Session、設定與封鎖紀錄放在使用者資料目錄，不寫入 App bundle
+- 私訊廣告掃描與封鎖
+- 管理員群組訊息掃描與成員移除
+- 即時私訊／群組監聽
+- 文字與本機 Tesseract OCR 廣告辨識
+- 白名單、黑名單與學習規則
+- 封鎖記錄與每日／每週報告
+- 每個 Telegram 帳號獨立的 Session、設定、名單與記錄
 
-> 歷史掃描需要先停止即時防護，避免同一個 Telegram Session 被兩個工作同時使用。
-> 預設私訊掃描檢查最近 30 個對話、每個最近 5 則、14 天內訊息；群組掃描檢查最近 50 個可管理對話、每群 20 則、3 天內訊息。範圍可在管理中心調整。
+### 桌面 UI parity
 
-### GitHub Actions 測試版
+- Telegram 帳號建立、切換、重新登入、登出與本機 Session 清理
+- 登入失敗會保留登入畫面供重試；登入成功後會關閉登入 sheet
+- Dashboard、即時防護、歷史掃描與進度／取消操作
+- 歷史掃描範圍、日期、對話數與訊息數設定
+- 白／黑名單 JSON／CSV 匯入與匯出
+- 學習規則、報告圖表、封鎖記錄與匯出
+- 群組管理、OCR runtime 狀態、開機啟動與 background mode
+- 安全的 destructive operation confirmation 與明確 `dry_run` 狀態
 
-本機不需要打包。到 GitHub Actions 手動執行 **Desktop test builds** workflow，或推送到 `main`／`feat/*` 分支後等待建置完成，即可下載：
+---
+
+## 架構 / Architecture
 
 ```text
-macOS-intel.dmg
-macOS-arm.dmg
+┌──────────────────────────────────────────────────────────┐
+│ Cross-platform legacy desktop                            │
+│ desktop_app.py (PySide6)                                 │
+│        │                                                  │
+│        └── existing Python/Telethon core                  │
+└──────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────┐
+│ macOS native desktop                                     │
+│ TeleShield.app                                           │
+│   SwiftUI UI                                              │
+│        │ line-delimited JSON-RPC over stdin/stdout         │
+│        ▼                                                  │
+│   Contents/Helpers/TeleShieldCore                         │
+│   PyInstaller Python sidecar (no PySide6)                 │
+│        │                                                  │
+│        ├── core_service.py                                │
+│        └── teleshield.py / Telethon                       │
+└──────────────────────────────────────────────────────────┘
 ```
 
-目前是未簽署測試版，macOS 可能顯示「無法驗證開發者」。此階段先用右鍵「打開」允許測試；正式發布再加入 Apple Developer signing 與 notarization。
+重要邊界：
 
-> Actions 會將 Tesseract、英文與簡體中文語言資料包進 macOS App；管理中心會顯示 OCR runtime 是否可用。
-> DMG 內的 App 仍然是以使用者個人 Telegram 身份執行。請只在自己的電腦使用，並妥善保護 Session。
+- SwiftUI 不直接 import Python，也不直接持有 Telethon client。
+- `core_service.py` 只提供 stdio、line-delimited JSON-RPC 與背景工作生命週期。
+- `requirements-sidecar.txt` 不包含 PySide6；PySide6 只屬於 legacy desktop 依賴。
+- sidecar 會處理帳號、登入、listener、掃描、OCR、名單、報告、Session 與 shutdown。
+- 帳號工作必須以明確 `account_id` 綁定，避免多帳號共用 Session 或資料目錄。
+- 關閉 sidecar 時會取消背景工作並等待可等待的 auth／scan／listener worker 結束。
 
----
+### Repository map
 
-## ✨ 功能 / Features
-
-| 功能 | 命令 | 說明 |
-|------|------|------|
-| 🔍 **私訊掃描** | `--scan` | 掃描近期非聯絡人對話，比對廣告模式並封鎖 |
-| 👥 **群組掃描** | `--group-scan` | 掃描群組近期訊息，踢除發廣告的成員（需管理員權限） |
-| 🛡️ **即時監聽** | `--listen` | 後台常駐，**同時監控私訊+群組**，秒級響應 |
-| 🧪 **試運行** | `--dry-run` | 安全預覽，只顯示結果不實際封鎖/踢除 |
-| 📸 **圖片 OCR** | 內建 | 純圖片廣告 → Tesseract 本地辨識文字 → 模式比對，**資料不外傳** |
-| 🧠 **學習模式** | `--learn <文字>` | 手動標記廣告，自動提取關鍵詞+生成正則模式 |
-| 📊 **封鎖報告** | `--report [day\|week]` | 生成每日/每週封鎖摘要，含類型統計+趨勢 |
-| ⚫ **黑名單** | `--blacklist add\|remove\|list [id]` | 加入黑名單後，在私訊/群組中**自動封鎖或踢除** |
-| ⚪ **白名單** | `--whitelist add\|remove\|list [id]` | 白名單用戶永不被掃描、封鎖或踢除 |
-| 📊 **狀態面板** | `--status` | 一覽封鎖數、踢除數、名單和學習模式狀態 |
-
-### 管理中心
-
-主畫面的「管理中心」包含六個分頁：
-
-- **完整名單**：瀏覽、搜尋、新增、移除、批次匯入／匯出 JSON／CSV
-- **學習規則**：貼上廣告範例，自動產生關鍵詞／模式，並查看或刪除規則
-- **報告**：過去 24 小時、7 天或全部記錄；包含來源、熱門原因、每日趨勢圖與 JSON 匯出
-- **封鎖記錄**：搜尋、依私訊／群組篩選，匯出 JSON／CSV
-- **群組管理**：讀取目前帳號可管理的群組，個別啟用／停用即時與歷史防護
-- **掃描／OCR／帳號**：自訂掃描範圍、檢查 bundled OCR、登出與清除本機 Session
-
-群組 discovery、登出等需要使用 Telegram Session 的動作，必須先停止即時防護；規則、報告與本機名單／記錄則可在防護執行時查看。
+| 路徑 | 用途 |
+|---|---|
+| `teleshield.py` | 上游 Python／Telethon 核心與 CLI |
+| `desktop_app.py` | legacy PySide6 desktop UI |
+| `desktop_platform.py` | 跨平台資料目錄與開機啟動 adapter |
+| `core_service.py` | 不含 PySide6 的 stdio JSON-RPC sidecar |
+| `swiftui/Sources/TeleShieldApp/` | macOS SwiftUI app、typed model、sidecar client |
+| `swiftui/Tests/` | SwiftUI 狀態邏輯回歸測試 |
+| `scripts/build_swiftui_macos.sh` | macOS app + PyInstaller helper bundle script |
+| `.github/workflows/desktop-build.yml` | Python checks、legacy DMG、SwiftUI Intel／ARM build |
+| `tests/` | Python sidecar、parity、安全與 lifecycle tests |
+| `requirements.txt` | Telethon core 依賴 |
+| `requirements-desktop.txt` | PySide6 legacy desktop 與 OCR／packaging 依賴 |
+| `requirements-sidecar.txt` | SwiftUI sidecar 與 OCR／PyInstaller 依賴，不含 PySide6 |
 
 ---
 
-## 🚀 快速開始 / Quick Start
+## 安全邊界與資料處理 / Security
 
-### 前置需求 / Prerequisites
+TeleShield 會以使用者自己的 Telegram 個人帳號透過 MTProto 執行操作。這不是 Bot API；請只在自己控制的帳號與裝置上使用，並先理解封鎖、移除群組成員與 Session 清理的不可逆風險。
 
-- Python 3.9+
-- Telegram API 憑證（[my.telegram.org/apps](https://my.telegram.org/apps)）
-- （選用）Tesseract OCR 用於圖片廣告辨識
+### Credentials 與 Session
 
-### 安裝 / Install
+- 不要把 API ID、API hash、電話、驗證碼、2FA 密碼、Session、token 或其他 credentials 寫入 README、issue、PR、測試 fixture、CI log 或聊天訊息。
+- 不要把真實 credentials 放進 shell history、command example、Git repository 或截圖。
+- 登入資料由本機 UI／sidecar 交給 Telethon；sidecar 對 RPC event、錯誤與 log 做 credential-like value redaction。
+- Telethon Session 與每個帳號的設定／記錄會放在使用者資料目錄，而不是 App bundle；Session 等同 Telegram 身分憑證，必須限制檔案權限並妥善保管。
+- 登出、清除 Session、刪除帳號資料是 destructive operation；執行前確認帳號與資料範圍。
+- 本文件與 CI 輸出不包含任何真實 credential；若要回報問題，請以 `[REDACTED]` 取代敏感值。
+
+### Destructive operation
+
+- CLI 的 `--dry-run` 只做預覽，不封鎖或移除成員。
+- 桌面歷史掃描預設使用 dry-run；要套用封鎖／移除必須明確確認。
+- JSON-RPC 的 `dry_run` 會按布林語意解析；字串 `"false"` 不應被當成 `true`。
+- 群組管理需要 Telegram 管理員權限；請先用 dry-run 檢查結果，再決定是否實際執行。
+- 不要為了測試而使用 `sudo`、`spctl --master-disable`，或關閉全域 macOS Gatekeeper。
+
+---
+
+## CLI 快速開始 / CLI quick start
+
+### Prerequisites
+
+- Python 3.9 或更新版本（CI 使用 Python 3.11）
+- 你的 Telegram API application credentials
+- （選用）Tesseract OCR；桌面 CI 會另外 bundle 英文／簡體中文 runtime
+
+### 建立環境與安裝
 
 ```bash
-# 克隆倉庫
-git clone https://github.com/c92d58/TeleShield.git
-cd TeleShield
-
-# 安裝核心依賴
-pip install telethon
-
-# 圖片 OCR 支援（選用，強烈建議安裝）
-apt install tesseract-ocr tesseract-ocr-chi-sim
-pip install pytesseract Pillow
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-### 首次設定 / First-time Setup
+如果需要 legacy PySide6 desktop：
+
+```bash
+python -m pip install -r requirements-desktop.txt
+```
+
+如果只需要 SwiftUI sidecar 的 Python 依賴：
+
+```bash
+python -m pip install -r requirements-sidecar.txt
+```
+
+### 首次登入
+
+不要把 credentials 放在 command line 或貼進 shell history；使用互動輸入：
 
 ```bash
 python teleshield.py --setup
 ```
 
-依序輸入：
-1. `API ID` — 從 [my.telegram.org/apps](https://my.telegram.org/apps) 取得
-2. `API Hash` — 同上
-3. `手機號碼` — 含國碼，如 `+852****5931`
-4. `驗證碼` — Telegram 會發送驗證碼到你手機
-
-登入成功後自動儲存 Session，下次不需重複登入。
-
-### 基本用法 / Usage
+登入完成後，Telethon 會使用本機 Session。若要測試隔離資料目錄，可先設定：
 
 ```bash
-# ─── 私訊防護 ───
+export TELESHIELD_DATA_DIR="$PWD/.local-teleshield-data"
+python teleshield.py --setup
+```
 
-# 先試運行看看結果
+`TELESHIELD_DATA_DIR` 只適合 disposable local test；不要把產生的 Session 或設定加入 Git。
+
+### 常用 CLI 操作
+
+```bash
+# 先預覽私訊結果，不執行封鎖
 python teleshield.py --dry-run
 
-# 實際掃描近期待處理的廣告
+# 實際掃描並封鎖私訊（destructive）
 python teleshield.py --scan
 
-# 啟動即時監聽（後台常駐，私訊+群組全保護）
-python teleshield.py --listen
+# 預覽群組處理結果
+python teleshield.py --group-scan --dry-run
 
-# ─── 群組管理 ───
-
-# 掃描所有管理中的群組，踢除廣告發送者
+# 實際掃描管理員群組並移除成員（destructive）
 python teleshield.py --group-scan
 
-# ─── 學習與報告 ───
+# 啟動即時監聽
+python teleshield.py --listen
 
-# 手動標記廣告文字，讓程式學習新模式
-python teleshield.py --learn "加微信 abc123 投資穩賺日入過萬"
-
-# 查看封鎖摘要
-python teleshield.py --report         # 過去 24 小時
-python teleshield.py --report week    # 過去 7 天 + 趨勢
-
-# ─── 名單管理 ───
-
-# 白名單（永不封鎖）
-python teleshield.py --whitelist add 12345678
-python teleshield.py --whitelist list
-
-# 黑名單（見一個封一個）
-python teleshield.py --blacklist add 87654321
-python teleshield.py --blacklist remove 87654321
-
-# 查看完整狀態
+# 狀態、報告與學習
 python teleshield.py --status
-```
-
----
-
-## 📖 完整命令參考 / Full Command Reference
-
-| 命令 | 說明 |
-|------|------|
-| `--setup [api_id] [api_hash] [phone] [code]` | 首次設定或重新登入 |
-| `--scan` | 掃描非聯絡人私訊，封鎖廣告 |
-| `--dry-run` | 試運行掃描（不實際封鎖） |
-| `--listen` | **即時監聽模式** — 私訊封鎖 + 群組踢除同時運作 |
-| `--group-scan` | 掃描管理中的群組，踢除廣告發送者 |
-| `--status` | 查看完整狀態面板 |
-| `--report [day\|week]` | 封鎖摘要報告（預設 day） |
-| `--learn <文字>` | 手動標記廣告文字，自動學習新模式 |
-| `--whitelist add\|remove\|list [user_id]` | 白名單管理 |
-| `--blacklist add\|remove\|list [user_id]` | 黑名單管理 |
-
----
-
-## 👥 群組管理詳解
-
-TeleShield 支援自動管理你具有**管理員權限**的群組：
-
-| 場景 | 行為 |
-|------|------|
-| `--listen` 運行中 | 群組內有新訊息 → 自動檢測 → 踢除廣告發送者 |
-| `--group-scan` | 掃描最近 20 條訊息 → 批次踢除 |
-| 管理員自動跳過 | 群組管理員和創建者不受影響 |
-| 白名單跳過 | 白名單中的用戶不會被踢除 |
-| 3 天窗口 | 只檢查最近 3 天內的訊息 |
-
-踢除使用 **ChatBannedRights(view_messages=True)**，相當於 Telegram 的「封鎖用戶 + 移除」，對方無法再次加入。
-
----
-
-## 🧠 學習模式詳解
-
-遇到新模式廣告時，使用 `--learn` 讓 TeleShield 自動學習：
-
-```bash
-# 範例：標記一個包含 URL 的廣告
-python teleshield.py --learn "https://bit.ly/3XabcDe 免費領取 BTC"
-
-# 範例：標記一個 LINE/微信推廣
-python teleshield.py --learn "➕官方LINE：@free888 每日推薦飆股"
-```
-
-學習機制：
-
-| 步驟 | 說明 |
-|------|------|
-| 🔍 提取關鍵詞 | 過濾停用詞，提取 2-6 字高價值關鍵詞 |
-| 🧩 生成正則 | 自動從 URL、ID 等結構生成可複用的模式 |
-| 💾 持久儲存 | 保存在 `config.json` 中，每次啟動載入 |
-| 🔄 即時生效 | 學習後 `is_spam()` 立即使用新模式 |
-
-累計學習結果可透過 `--status` 查看。
-
----
-
-## 📊 封鎖報告
-
-```bash
-# 每日報告
 python teleshield.py --report
-
-# 每週報告（含每日趨勢）
 python teleshield.py --report week
+python teleshield.py --learn "[REDACTED]"
+
+# 白名單／黑名單
+python teleshield.py --whitelist list
+python teleshield.py --blacklist list
 ```
 
-報告內容：
+CLI 是上游相容路徑；請以 `teleshield.py` 的實際輸出與程式碼為準，不要把 README 範例當成真實 Telegram network 驗證結果。
 
-```
-📊 封鎖摘要 — 過去 24 小時
-────────────────────────────
-   總計封鎖: 12 人
+---
 
-   來源:
-     • 私訊: 10 人
-     • 群組: 2 人
+## Legacy PySide6 desktop
 
-   廣告類型 Top 5:
-     • 投資理財: 5 次
-     • 兼職詐騙: 3 次
-     • 色情: 2 次
-     • 賭博: 1 次
-     • 英文 Spam: 1 次
+安裝 `requirements-desktop.txt` 後可啟動既有跨平台 UI：
 
-   每日趨勢:
-     2026-07-14: 12 人
+```bash
+python desktop_app.py
 ```
 
----
-
-## 🔍 廣告識別模式 / Spam Patterns
-
-TeleShield 內建 20+ 正則表達式，加上學習模式可無限擴充：
-
-| 類別 | 範例關鍵字 |
-|------|-----------|
-| 💰 投資理財 | 投資、帶單、跟單、量化、穩賺 |
-| 💼 兼職詐騙 | 兼職、刷單、日入、躺賺、被動收入 |
-| 🔞 色情 | 裸聊、約炮、援交、成人 |
-| 🎰 賭博 | 賭、博彩、casino、betting |
-| 📣 群組推廣 | @xxx、t.me/xxx、加微信 |
-| 🎁 假優惠 | 免費領、紅包、優惠碼、推廣碼 |
-| 📢 英文 Spam | promotion, giveaway, earn money, free crypto |
-| 📸 **圖片 OCR** | 純圖片廣告 → Tesseract 本地辨識 → 模式比對 |
-| 🧠 **學習模式** | 你標記什麼，它就學會什麼 |
+它保留系統匣／背景防護、登入、歷史掃描、管理中心、群組、OCR、報告、名單與 Session 管理。Windows／Linux 的既有 PySide6 workflow 不應依賴 SwiftUI；SwiftUI sidecar 的改動也不應把 PySide6 加入 `requirements-sidecar.txt`。
 
 ---
 
-## ⚙️ 安全性與權限
+## macOS SwiftUI 測試版
 
-### 身分驗證
+SwiftUI app 位於 `swiftui/`，由 SwiftUI 管理畫面與狀態，`TeleShieldCore` sidecar 管理 Telegram／Telethon 業務核心。登入 state 的重要行為如下：
 
-- 使用 **MTProto**（Telegram 官方協議）直接登入，非 Bot API
-- Session 文件（`user.session`）使用 Telethon 內部加密儲存
-- API 憑證僅儲存在本地 `config.json`
-
-### 權限需求
-
-| 功能 | 所需權限 |
-|------|---------|
-| 私訊封鎖 | 無需額外權限（任何帳號皆可封鎖他人） |
-| 群組踢除 | **群組管理員**（需 ban_users 權限） |
-| 圖片 OCR | 本地 Tesseract，無需網路權限 |
-
-### 風險說明
-
-- Session 文件 = 你的 Telegram 身份，務必保護好
-- `chmod 600 ~/.tg-sessions/*` 限制檔案權限
-- 群組踢除不可逆，使用 `--group-scan dry` 預覽再執行
-
----
-
-## 🗂️ 專案結構 / Project Structure
-
-```
-TeleShield/
-├── teleshield.py       # 主程式（完整功能）
-├── README.md           # 本文件
-├── LICENSE             # MIT 授權
-└── .gitignore
-
-.tg-sessions/           # 運行後自動生成
-├── user.session        # Telegram 登入 Session（已加密）
-├── config.json         # 設定 + 學習模式 + 名單
-└── block_log.json      # 封鎖記錄（用於報告）
+```text
+auth_succeeded + current account → close login sheet
+                    │
+auth_failed          └──────────────→ keep sheet open for retry
 ```
 
+### 取得 GitHub Actions artifact
+
+macOS build 應透過 GitHub Actions 執行，而不是把本機產出的 app 當成發布 artifact：
+
+1. 在 GitHub repository 開啟 **Actions → Desktop test builds**。
+2. 使用 `workflow_dispatch`，或 push 到 `main`／`feat/**` 分支後等待 workflow。
+3. 確認 Python checks、SwiftUI state tests、sidecar self-test、OCR runtime 與目標架構檢查都成功。
+4. 下載對應 artifact：
+
+   ```text
+   macOS-intel-swiftui
+   macOS-arm-swiftui
+   ```
+
+Workflow 也會建立 legacy `macOS-intel` 與 `macOS-arm` artifact。SwiftUI app 的預期架構由 CI 以 `lipo -archs` 驗證：Intel 為 `x86_64`，Apple Silicon 為 `arm64`。
+
+### unsigned DMG 的安全測試方式
+
+下載後先驗證檔案來源與 checksum，再用 Finder 對已驗證的 `.app` 右鍵選 **打開 → 打開**。不要關閉全域 Gatekeeper。若需要診斷 quarantine，只對已驗證的單一 app 處理，不要使用 `sudo`：
+
+```bash
+shasum -a 256 ~/Downloads/macOS-arm-swiftui.dmg
+xattr -l "/Applications/TeleShield.app"
+open "/Applications/TeleShield.app"
+```
+
+目前 artifact 未簽章、未 notarize；這是測試限制，不是正式發行承諾。正式發布仍需要 Apple Developer signing、notarization 與 stapling credentials，這些 credentials 不存放在 repository 或 CI log。
+
 ---
 
-## 🧩 後續計劃 / Roadmap
+## Sidecar JSON-RPC smoke test
 
-- [x] 圖片廣告辨識：Tesseract 本地 OCR
-- [x] 群組管理：自動踢除發廣告的群組成員
-- [x] 學習模式：手動標記後自動歸納特徵
-- [x] 封鎖報告：每日/每週封鎖摘要報告
-- [x] 白名單 / 黑名單管理指令
-- [ ] Docker 一鍵部署
-- [ ] Web Dashboard（查看封鎖統計 + 管理名單）
-- [ ] Telegram Bot 指令管理（/block, /whitelist 等）
+`core_service.py` 提供兩種 headless 入口：
+
+```bash
+python core_service.py --self-test
+```
+
+或以 line-delimited JSON-RPC 測試無 credentials 的狀態、OCR 與 shutdown：
+
+```bash
+printf '%s\n' \
+  '{"id":1,"method":"get_status"}' \
+  '{"id":2,"method":"get_ocr_status"}' \
+  '{"id":3,"method":"shutdown"}' \
+  | python core_service.py --stdio
+```
+
+正常情況會收到相同 `id` 的 JSON response，並以 `ok: true` 表示該 request 成功。這只驗證 sidecar protocol 與本機 runtime，不等於真實 Telegram 登入或 network 操作成功。
 
 ---
 
-## 📄 License
+## 測試與驗證 / Testing
 
-[MIT](LICENSE) © 2026 WAHSUN
+### Python
+
+```bash
+python -m py_compile teleshield.py desktop_app.py desktop_platform.py core_service.py
+python -m pytest -q
+git diff --check
+```
+
+測試包含 sidecar protocol、帳號 lifecycle、名單／掃描／報告 parity、dry-run safety、redaction、listener unexpected exit 與 worker shutdown。Fake core／platform 測試不會連到真實 Telegram。
+
+### SwiftUI
+
+在 macOS 上：
+
+```bash
+swift test --package-path swiftui
+swift build --package-path swiftui -c release
+```
+
+完整 app bundle 與 PyInstaller sidecar 的建置由：
+
+```bash
+scripts/build_swiftui_macos.sh
+```
+
+但本 repository 的雙架構 DMG、OCR bundle、helper self-test 與 artifact 產出以 `.github/workflows/desktop-build.yml` 為交付驗證來源。GitHub Actions 綠燈只代表 workflow 中列出的 checks 通過，不能取代實體 macOS 與真實 Telegram 帳號驗收。
 
 ---
+
+## 本機資料目錄 / Local data
+
+`TELESHIELD_DATA_DIR` 可覆寫預設資料根目錄；未設定時大致使用：
+
+| 平台 | 預設位置 |
+|---|---|
+| macOS | `~/Library/Application Support/TeleShield` |
+| Windows | `%APPDATA%/TeleShield` |
+| Linux | `~/.local/share/TeleShield` |
+
+帳號資料會分開保存 Session、設定、學習規則與封鎖記錄。實際檔名與 migration 以 `teleshield.py` 為準。這些資料不應加入 Git、上傳 issue，或放進 App bundle。
+
+---
+
+## 貢獻與 fork 原則 / Contributions
+
+- 先閱讀上游 TeleShield 的設計與 MIT license，保留原作者 attribution。
+- Python core 的修正應盡量維持 CLI 與 PySide6 backward compatibility。
+- SwiftUI 只負責 native UI；Telegram／Telethon 邏輯應留在 sidecar。
+- 新增功能時補上 headless regression test；不要用 credentials 來做 CI 測試。
+- destructive operation 必須有明確 dry-run／confirmation；不要把預設值改成無提示執行。
+- 不要提交 Session、API hash、電話、驗證碼、2FA password、token、真實 log 或任何 credential。
+- 提交 macOS UI 變更前，使用 GitHub Actions 驗證 Swift 編譯與目標架構；CI artifact 是 unsigned test build，除非另行完成正式簽章流程。
+
+---
+
+## License
+
+本 fork 延續上游 repository 的 [MIT License](LICENSE)。上游原作與作者 attribution 請保留；本 fork 新增的桌面整合與 macOS SwiftUI 變更同樣依 repository license 發布。
 
 <div align="center">
-  <sub>Made with ❤️ by WAHSUN · 讓 Telegram 清淨一點</sub>
+  <sub>Respect the upstream author. Build downstream improvements carefully. 🛡️</sub>
 </div>
