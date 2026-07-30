@@ -203,6 +203,7 @@ struct AccountDetails: Codable {
     let learnedPatterns: LearnedPatterns
     let autoStart: Bool
     let autoStartAccountID: String?
+    let autoStartAccountIDs: [String]
 
     enum CodingKeys: String, CodingKey {
         case accountID = "account_id"
@@ -213,6 +214,7 @@ struct AccountDetails: Codable {
         case learnedPatterns = "learned_patterns"
         case autoStart = "auto_start"
         case autoStartAccountID = "auto_start_account_id"
+        case autoStartAccountIDs = "auto_start_account_ids"
     }
 }
 

@@ -1,1 +1,2 @@
 telethon>=1.44,<2
+opencc-python-reimplemented>=0.1.7,<1

@@ -232,6 +232,7 @@ class FakeParityCore(FakeCore):
         self.learned = {"keywords": ["spam"], "patterns": ["https://"]}
         self.groups = [{"id": "-100", "title": "Announcements", "enabled": True}]
         self.calls = []
+        self.auto_start_ids = ["account-a"]
 
     def create_account(self):
         self.calls.append("create_account")
@@ -283,7 +284,14 @@ class FakeParityCore(FakeCore):
         return 4
 
     def get_auto_start_account_id(self):
-        return "account-a"
+        return self.auto_start_ids[0] if self.auto_start_ids else None
+
+    def get_auto_start_account_ids(self):
+        return list(self.auto_start_ids)
+
+    def set_auto_start_accounts(self, account_ids):
+        self.auto_start_ids = list(account_ids)
+        return list(self.auto_start_ids)
 
 
 def _wait_for_event(events, name, timeout=2):
@@ -333,8 +341,13 @@ def test_account_details_exposes_global_auto_start_and_omits_credentials():
     assert details["account_id"] == "account-a"
     assert details["auto_start"] is True
     assert details["auto_start_account_id"] == "account-a"
+    assert details["auto_start_account_ids"] == ["account-a"]
     assert "api_id" not in details
     assert "api_hash" not in details
+
+    assert service.dispatch("set_auto_start", {"account_ids": ["account-a", "account-b"]}) == {
+        "account_ids": ["account-a", "account-b"]
+    }
 
 
 def test_scan_protocol_preserves_explicit_false_dry_run():

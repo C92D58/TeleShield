@@ -452,12 +452,17 @@ class CoreService:
     def _get_account_details(self, params: dict[str, Any]) -> dict[str, Any]:
         account_id = self._resolve_account_id(params)
         cfg = self.core.load_config(account_id) or {}
-        auto_start_account_id = None
-        if hasattr(self.core, "get_auto_start_account_id"):
-            auto_start_account_id = self.core.get_auto_start_account_id()
-            auto_start = auto_start_account_id == account_id
+        auto_start_account_ids: list[str] = []
+        if hasattr(self.core, "get_auto_start_account_ids"):
+            auto_start_account_ids = list(self.core.get_auto_start_account_ids() or [])
+        elif hasattr(self.core, "get_auto_start_account_id"):
+            legacy_id = self.core.get_auto_start_account_id()
+            auto_start_account_ids = [legacy_id] if legacy_id else []
+        if auto_start_account_ids:
+            auto_start = account_id in auto_start_account_ids
         else:
             auto_start = bool(cfg.get("auto_start_protection"))
+        auto_start_account_id = auto_start_account_ids[0] if auto_start_account_ids else None
         return {
             "account_id": account_id,
             "logged_in": bool(cfg.get("user_id")),
@@ -467,6 +472,7 @@ class CoreService:
             "learned_patterns": self.core.get_learned_patterns(account_id=account_id),
             "auto_start": auto_start,
             "auto_start_account_id": auto_start_account_id,
+            "auto_start_account_ids": auto_start_account_ids,
         }
 
     def _get_startup_status(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -484,11 +490,21 @@ class CoreService:
         return self.core.set_active_account(account_id)
 
     def _set_auto_start(self, params: dict[str, Any]) -> dict[str, Any]:
+        if "account_ids" in params:
+            raw_ids = params.get("account_ids")
+            if not isinstance(raw_ids, list):
+                raise InvalidRequestError("account_ids 必須是 JSON array")
+            if hasattr(self.core, "set_auto_start_accounts"):
+                selected = self.core.set_auto_start_accounts([str(item) for item in raw_ids])
+            else:
+                raise InvalidRequestError("目前核心不支援多帳號自動啟動")
+            return {"account_ids": list(selected)}
+
         account_id = params.get("account_id")
         selected = self.core.set_auto_start_account(
             None if account_id in (None, "") else str(account_id)
         )
-        return {"account_id": selected}
+        return {"account_id": selected, "account_ids": [selected] if selected else []}
 
     def _start_auth(self, params: dict[str, Any]) -> dict[str, Any]:
         api_id = str(params.get("api_id") or "").strip()

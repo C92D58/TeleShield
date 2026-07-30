@@ -195,13 +195,18 @@ final class CoreClient: ObservableObject {
         }
     }
 
-    func setAutoStart(accountID: String?) async {
+    func setAutoStartAccounts(accountIDs: [String]) async {
         do {
-            var params: [String: JSONValue] = [:]
-            if let accountID { params["account_id"] = .string(accountID) }
-            _ = try await request(method: "set_auto_start", params: params)
+            _ = try await request(
+                method: "set_auto_start",
+                params: ["account_ids": .array(accountIDs.map(JSONValue.string))]
+            )
             await refreshAccountData()
         } catch { present(error: error) }
+    }
+
+    func setAutoStart(accountID: String?) async {
+        await setAutoStartAccounts(accountIDs: accountID.map { [$0] } ?? [])
     }
 
     func setStartup(_ enabled: Bool) async {
@@ -529,11 +534,18 @@ final class CoreClient: ObservableObject {
         guard !backgroundStartupHandled,
               ProcessInfo.processInfo.arguments.contains("--background") else { return }
         backgroundStartupHandled = true
-        guard let autoStartAccountID = details?.autoStartAccountID else { return }
-        if selectedAccountID != autoStartAccountID {
-            await selectAccount(autoStartAccountID)
+        let autoStartAccountIDs = details?.autoStartAccountIDs ?? []
+        guard !autoStartAccountIDs.isEmpty else { return }
+        let originalAccountID = selectedAccountID
+        for accountID in autoStartAccountIDs {
+            if selectedAccountID != accountID {
+                await selectAccount(accountID)
+            }
+            await startProtection()
         }
-        await startProtection()
+        if let originalAccountID, selectedAccountID != originalAccountID {
+            await selectAccount(originalAccountID)
+        }
     }
 
     private func accountParams() -> [String: JSONValue]? {

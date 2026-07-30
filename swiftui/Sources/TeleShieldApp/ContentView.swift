@@ -711,13 +711,32 @@ private struct SettingsView: View {
     var body: some View {
         Form {
             Section("啟動與防護") {
-                Toggle("登入系統時自動啟動 TeleShield", isOn: Binding(get: { client.startupEnabled }, set: { value in Task { await client.setStartup(value) } }))
-                Picker("自動啟動防護的帳號", selection: Binding(get: { client.details?.autoStartAccountID ?? "" }, set: { value in Task { await client.setAutoStart(accountID: value.isEmpty ? nil : value) } })) {
-                    Text("不自動啟動").tag("")
-                    ForEach(client.status?.accounts ?? []) { account in Text(account.label).tag(account.id) }
+                VStack(alignment: .leading, spacing: 10) {
+                    Toggle("登入系統時自動啟動 TeleShield", isOn: Binding<Bool>(get: { client.startupEnabled }, set: { value in Task { await client.setStartup(value) } }))
+                    Toggle("啟用自動啟動防護", isOn: Binding<Bool>(
+                        get: { !clientAutoStartAccountIDs.isEmpty },
+                        set: { enabled in
+                            let ids: [String] = enabled
+                                ? (clientAutoStartAccountIDs.isEmpty ? configuredAccountIDs : Array(clientAutoStartAccountIDs))
+                                : []
+                            Task { await client.setAutoStartAccounts(accountIDs: ids) }
+                        }
+                    ))
+                    .disabled(configuredAccountIDs.isEmpty)
+                    Text("勾選的 Telegram 帳號會在背景啟動時個別開始防護。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(client.status?.accounts ?? []) { account in
+                        Toggle(account.label, isOn: Binding<Bool>(
+                            get: { clientAutoStartAccountIDs.contains(account.id) },
+                            set: { enabled in updateAutoStart(accountID: account.id, enabled: enabled) }
+                        ))
+                        .help(account.configured ? account.accountIdentifier : "尚未登入")
+                        .disabled(!account.configured)
+                    }
+                    Text("關閉視窗只會隱藏到 Menu Bar，不會停止防護；要停止請使用防護頁或 Menu Bar。")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("關閉視窗只會隱藏到 Menu Bar，不會停止防護；要停止請使用防護頁或 Menu Bar。")
-                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("歷史掃描限制") {
                 ScanStepper(title: "私訊對話數", value: $settings.privateDialogLimit, range: 1...100)
@@ -766,6 +785,25 @@ private struct SettingsView: View {
             Button("確認全部刪除", role: .destructive) { Task { await client.clearSession(removeCredentials: true) } }
             Button("取消", role: .cancel) {}
         }
+    }
+
+    private var clientAutoStartAccountIDs: Set<String> {
+        Set(client.details?.autoStartAccountIDs ?? [])
+    }
+
+    private var configuredAccountIDs: [String] {
+        (client.status?.accounts ?? []).filter(\.configured).map(\.id)
+    }
+
+    private func updateAutoStart(accountID: String, enabled: Bool) {
+        var ids = clientAutoStartAccountIDs
+        if enabled {
+            ids.insert(accountID)
+        } else {
+            ids.remove(accountID)
+        }
+        let orderedIDs = (client.status?.accounts ?? []).map(\.id).filter { ids.contains($0) }
+        Task { await client.setAutoStartAccounts(accountIDs: orderedIDs) }
     }
 }
 
@@ -842,6 +880,8 @@ private struct LoginSheet: View {
                     Text("目前帳號：\(client.selectedAccount?.label ?? "尚未選取")").foregroundStyle(.secondary)
                 }
                 Spacer()
+                Link("MTProto API 註冊", destination: URL(string: "https://my.telegram.org/auth?to=apps")!)
+                    .font(.callout.weight(.semibold))
                 Button("關閉") { dismiss() }
             }
             Divider()

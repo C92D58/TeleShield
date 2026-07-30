@@ -36,6 +36,7 @@ copy_lang() {
 
 copy_lang eng
 copy_lang chi_sim
+copy_lang chi_tra
 
 # dylibbundler follows Homebrew's dependency graph and rewrites load paths to
 # the app-local lib directory. System libraries are intentionally not copied.

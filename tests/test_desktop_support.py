@@ -355,6 +355,20 @@ def test_learn_text_returns_changes_and_persists_rules(monkeypatch, tmp_path):
     assert teleshield.is_spam("這是投資穩賺廣告", cfg)
 
 
+def test_simplified_text_is_normalized_for_rules_and_learning(monkeypatch, tmp_path):
+    configure_temp_storage(monkeypatch, tmp_path)
+    cfg = {"learned_patterns": {"keywords": ["投資"], "patterns": []}}
+
+    assert teleshield.normalize_traditional("投资稳赚") == "投資穩賺"
+    assert teleshield.is_spam("這是投资廣告", cfg) is True
+
+    result = teleshield.learn_text("加微信 投资稳赚")
+
+    assert result["normalized_text"] == "加微信 投資穩賺"
+    learned = teleshield.load_config()["learned_patterns"]["keywords"]
+    assert "投資穩賺" in learned
+
+
 def test_learned_pattern_listing_and_removal(monkeypatch, tmp_path):
     configure_temp_storage(monkeypatch, tmp_path)
     teleshield.save_config({
@@ -517,7 +531,7 @@ def test_ocr_status_uses_configured_executable_without_logging_path(monkeypatch,
 
     assert status["available"] is True
     assert status["bundled"] is False
-    assert status["languages"] == ["chi_sim", "eng"]
+    assert status["languages"] == ["chi_sim", "chi_tra", "eng"]
 
 
 def test_discover_managed_groups_returns_only_admin_groups(monkeypatch, tmp_path):
@@ -1206,8 +1220,12 @@ def test_auto_start_account_is_persisted_and_cleared_on_remove(monkeypatch, tmp_
     assert teleshield.get_auto_start_account_id() == second["id"]
     assert first["auto_start_protection"] is False
 
+    assert teleshield.set_auto_start_accounts([first["id"], second["id"]]) == [first["id"], second["id"]]
+    assert teleshield.get_auto_start_account_ids() == [first["id"], second["id"]]
+    assert first["id"] in teleshield._read_account_registry()["auto_start_account_ids"]
+
     assert teleshield.remove_account(second["id"], delete_files=True) is True
-    assert teleshield.get_auto_start_account_id() is None
+    assert teleshield.get_auto_start_account_ids() == [first["id"]]
 
 
 def test_concurrent_identity_updates_reject_duplicate_user_id(monkeypatch, tmp_path):
