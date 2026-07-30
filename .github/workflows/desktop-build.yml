@@ -73,15 +73,18 @@ jobs:
           --clean
           --windowed
           --name TeleShield
+          --collect-data opencc
           --add-data "build/tesseract-runtime:tesseract-runtime"
           desktop_app.py
       - name: Verify bundled OCR runtime inside app
         run: |
           TESSERACT_BIN="$(find dist/TeleShield.app -type f -path '*/tesseract-runtime/bin/tesseract' -print -quit)"
           CHI_SIM_DATA="$(find dist/TeleShield.app -type f -path '*/tesseract-runtime/share/tessdata/chi_sim.traineddata' -print -quit)"
+          CHI_TRA_DATA="$(find dist/TeleShield.app -type f -path '*/tesseract-runtime/share/tessdata/chi_tra.traineddata' -print -quit)"
           ENG_DATA="$(find dist/TeleShield.app -type f -path '*/tesseract-runtime/share/tessdata/eng.traineddata' -print -quit)"
           test -n "$TESSERACT_BIN"
           test -n "$CHI_SIM_DATA"
+          test -n "$CHI_TRA_DATA"
           test -n "$ENG_DATA"
           chmod 755 "$TESSERACT_BIN"
           TESSDATA_PREFIX="$(dirname "$CHI_SIM_DATA")" "$TESSERACT_BIN" --list-langs
@@ -182,9 +185,11 @@ jobs:
           ROOT="dist/TeleShieldSwiftUI.app/Contents/Helpers/TeleShieldCore"
           TESSERACT_BIN="$(find "$ROOT" -type f -path '*/tesseract-runtime/bin/tesseract' -print -quit)"
           CHI_SIM_DATA="$(find "$ROOT" -type f -path '*/tesseract-runtime/share/tessdata/chi_sim.traineddata' -print -quit)"
+          CHI_TRA_DATA="$(find "$ROOT" -type f -path '*/tesseract-runtime/share/tessdata/chi_tra.traineddata' -print -quit)"
           ENG_DATA="$(find "$ROOT" -type f -path '*/tesseract-runtime/share/tessdata/eng.traineddata' -print -quit)"
           test -n "$TESSERACT_BIN"
           test -n "$CHI_SIM_DATA"
+          test -n "$CHI_TRA_DATA"
           test -n "$ENG_DATA"
           chmod 755 "$TESSERACT_BIN"
           TESSDATA_PREFIX="$(dirname "$CHI_SIM_DATA")" "$TESSERACT_BIN" --list-langs

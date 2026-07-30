@@ -117,6 +117,24 @@ _ACCOUNT_SESSION_MUTEX_GUARD = threading.Lock()
 _ACCOUNT_SESSION_MUTEXES = {}
 _ACCOUNT_SESSION_LOCK_STATE = threading.local()
 
+_OPENCC_S2T = None
+
+
+def normalize_traditional(text: str) -> str:
+    """Normalize Simplified Chinese to Traditional Chinese for matching."""
+    if not text:
+        return text
+    global _OPENCC_S2T
+    try:
+        if _OPENCC_S2T is None:
+            from opencc import OpenCC
+
+            _OPENCC_S2T = OpenCC("s2t")
+        return _OPENCC_S2T.convert(text)
+    except Exception:
+        # Keep text processing available if an older external install lacks OpenCC.
+        return text
+
 
 class AccountSessionBusyError(RuntimeError):
     """Raised when another operation owns an account's Telegram Session."""
@@ -279,6 +297,8 @@ def _empty_account_registry() -> dict:
         "active_account_id": None,
         "auto_start_account_id": None,
         "auto_start_account_configured": False,
+        "auto_start_account_ids": [],
+        "auto_start_accounts_configured": False,
         "accounts": [],
     }
 
@@ -297,6 +317,17 @@ def _read_account_registry(root: Optional[Path] = None) -> dict:
     accounts = data.get("accounts")
     if not isinstance(accounts, list):
         accounts = []
+    raw_account_ids = data.get("auto_start_account_ids")
+    if isinstance(raw_account_ids, list):
+        auto_start_account_ids = [str(item) for item in raw_account_ids if item]
+    elif data.get("auto_start_account_id"):
+        auto_start_account_ids = [str(data["auto_start_account_id"])]
+    else:
+        auto_start_account_ids = []
+    if "auto_start_accounts_configured" in data:
+        auto_start_accounts_configured = bool(data["auto_start_accounts_configured"])
+    else:
+        auto_start_accounts_configured = bool(data.get("auto_start_account_configured", False))
     return {
         "version": int(data.get("version", 1)),
         "active_account_id": data.get("active_account_id"),
@@ -304,6 +335,8 @@ def _read_account_registry(root: Optional[Path] = None) -> dict:
         "auto_start_account_configured": bool(
             data.get("auto_start_account_configured", "auto_start_account_id" in data)
         ),
+        "auto_start_account_ids": auto_start_account_ids,
+        "auto_start_accounts_configured": auto_start_accounts_configured,
         "accounts": [dict(item) for item in accounts if isinstance(item, dict)],
     }
 
@@ -483,20 +516,20 @@ def _config_requests_legacy_auto_start(account_id: str) -> bool:
 
 
 @_registry_locked
-def get_auto_start_account_id(root: Optional[Path] = None) -> Optional[str]:
-    """Return the one account selected for automatic protection at app startup."""
+def get_auto_start_account_ids(root: Optional[Path] = None) -> list[str]:
+    """Return accounts selected for automatic protection at app startup."""
     registry = _read_account_registry(root)
     account_ids = {str(item.get("id")) for item in registry.get("accounts", []) if item.get("id")}
-    selected = registry.get("auto_start_account_id")
-    if registry.get("auto_start_account_configured"):
-        if selected:
+    if registry.get("auto_start_accounts_configured"):
+        selected = []
+        for raw_id in registry.get("auto_start_account_ids", []):
             try:
-                selected = _validate_account_id(str(selected))
+                candidate_id = _validate_account_id(str(raw_id))
             except ValueError:
-                return None
-            if selected in account_ids:
-                return selected
-        return None
+                continue
+            if candidate_id in account_ids and candidate_id not in selected:
+                selected.append(candidate_id)
+        return selected
     # Backward compatibility for registries created before the global selector.
     legacy = []
     for item in registry.get("accounts", []):
@@ -511,22 +544,48 @@ def get_auto_start_account_id(root: Optional[Path] = None) -> Optional[str]:
             legacy.append(candidate_id)
     active = str(registry.get("active_account_id")) if registry.get("active_account_id") else ""
     if active in legacy:
-        return active
-    return legacy[0] if legacy else None
+        return [active] + [item for item in legacy if item != active]
+    return legacy
+
+
+@_registry_locked
+def get_auto_start_account_id(root: Optional[Path] = None) -> Optional[str]:
+    """Return the first selected account for legacy single-account callers."""
+    return next(iter(get_auto_start_account_ids(root)), None)
+
+
+@_registry_locked
+def set_auto_start_accounts(account_ids: list[str] | tuple[str, ...], root: Optional[Path] = None) -> list[str]:
+    """Persist the accounts whose protection should start with the app."""
+    root_path = _account_data_root(root)
+    registry = _read_account_registry(root_path)
+    selected = []
+    account_ids = account_ids or []
+    for raw_id in account_ids:
+        if raw_id in (None, ""):
+            continue
+        account_id = _validate_account_id(str(raw_id))
+        if not any(str(item.get("id")) == account_id for item in registry["accounts"]):
+            raise ValueError("找不到指定 Telegram 帳號")
+        if account_id not in selected:
+            selected.append(account_id)
+    registry["auto_start_account_ids"] = selected
+    registry["auto_start_accounts_configured"] = True
+    # Keep the old fields in sync for older desktop callers and registries.
+    registry["auto_start_account_id"] = selected[0] if selected else None
+    registry["auto_start_account_configured"] = True
+    selected_set = set(selected)
+    for record in registry["accounts"]:
+        record["auto_start_protection"] = str(record.get("id")) in selected_set
+    _write_account_registry(registry, root_path)
+    return list(selected)
 
 
 @_registry_locked
 def set_auto_start_account(account_id: Optional[str], root: Optional[Path] = None) -> Optional[str]:
-    """Persist the single account whose protection should start with the app."""
-    root_path = _account_data_root(root)
-    registry = _read_account_registry(root_path)
-    selected = None if account_id in (None, "") else _validate_account_id(str(account_id))
-    if selected and not any(str(item.get("id")) == selected for item in registry["accounts"]):
-        raise ValueError("找不到指定 Telegram 帳號")
-    registry["auto_start_account_id"] = selected
-    registry["auto_start_account_configured"] = True
-    _write_account_registry(registry, root_path)
-    return selected
+    """Persist one account for legacy single-account callers."""
+    selected = set_auto_start_accounts([] if account_id in (None, "") else [str(account_id)], root)
+    return selected[0] if selected else None
 
 
 @_registry_locked
@@ -619,8 +678,13 @@ def remove_account(account_id: str, delete_files: bool = True, root: Optional[Pa
     def commit_registry_removal() -> None:
         if registry.get("active_account_id") == account_id:
             registry["active_account_id"] = registry["accounts"][0]["id"] if registry["accounts"] else None
-        if registry.get("auto_start_account_id") == account_id:
-            registry["auto_start_account_id"] = None
+        selected_auto_start_ids = [
+            str(item) for item in registry.get("auto_start_account_ids", [])
+            if str(item) != account_id
+        ]
+        if len(selected_auto_start_ids) != len(registry.get("auto_start_account_ids", [])):
+            registry["auto_start_account_ids"] = selected_auto_start_ids
+            registry["auto_start_account_id"] = selected_auto_start_ids[0] if selected_auto_start_ids else None
         _write_account_registry(registry, root_path)
 
     if delete_files:
@@ -997,6 +1061,8 @@ def learn_text(text: str, account_id: Optional[str] = None) -> dict:
     text = (text or "").strip()
     if not text:
         raise ValueError("請提供要學習的廣告文字")
+    source_text = text
+    text = normalize_traditional(text)
 
     cfg = load_config(account_id)
     learned = get_learned_patterns(cfg, account_id)
@@ -1036,7 +1102,8 @@ def learn_text(text: str, account_id: Optional[str] = None) -> dict:
     save_config(cfg, account_id)
     save_learned_patterns(learned, account_id)
     return {
-        "text": text,
+        "text": source_text,
+        "normalized_text": text,
         "added_keywords": added_keywords,
         "added_patterns": added_patterns,
         "total_keywords": len(learned["keywords"]),
@@ -1327,12 +1394,13 @@ def find_tesseract() -> Optional[str]:
 def get_ocr_status() -> dict:
     path = find_tesseract()
     bundled = bool(path and getattr(sys, "_MEIPASS", None) and str(path).startswith(str(sys._MEIPASS)))
-    return {"available": bool(path), "bundled": bundled, "languages": ["chi_sim", "eng"] if path else []}
+    return {"available": bool(path), "bundled": bundled, "languages": ["chi_sim", "chi_tra", "eng"] if path else []}
 
 def is_spam(text: str, cfg: dict = None) -> bool:
     """檢查文字是否包含廣告模式（含自訂模式）"""
     if not text:
         return False
+    text = normalize_traditional(text)
     # 內建模式
     for pattern in SPAM_PATTERNS:
         if re.search(pattern, text, re.IGNORECASE):
@@ -1342,12 +1410,12 @@ def is_spam(text: str, cfg: dict = None) -> bool:
         lp = get_learned_patterns(cfg)
         for p in lp.get("patterns", []):
             try:
-                if re.search(p, text, re.IGNORECASE):
+                if re.search(normalize_traditional(p), text, re.IGNORECASE):
                     return True
             except:
                 continue
         for kw in lp.get("keywords", []):
-            if kw.lower() in text.lower():
+            if normalize_traditional(kw).lower() in text.lower():
                 return True
     return False
 
@@ -1388,8 +1456,8 @@ def ocr_image(image_path: str) -> str:
             if tessdata.is_dir():
                 config = f'--tessdata-dir "{tessdata}"'
         img = Image.open(image_path)
-        text = pytesseract.image_to_string(img, lang="chi_sim+eng", config=config)
-        return text.strip()
+        text = pytesseract.image_to_string(img, lang="chi_sim+chi_tra+eng", config=config)
+        return normalize_traditional(text.strip())
     except Exception:
         return ""
 

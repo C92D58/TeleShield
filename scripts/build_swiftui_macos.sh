@@ -15,6 +15,7 @@ python -m PyInstaller \
   --clean \
   --console \
   --name TeleShieldCore \
+  --collect-data opencc \
   --add-data "build/tesseract-runtime:tesseract-runtime" \
   core_service.py
 

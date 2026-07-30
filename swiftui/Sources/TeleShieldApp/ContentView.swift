@@ -179,6 +179,9 @@ private struct OverviewView: View {
             }
             .padding(28)
         }
+        .task(id: client.selectedAccountID) {
+            await client.fetchBlockRecords(query: "", source: "all")
+        }
     }
 }
 
@@ -284,12 +287,35 @@ private struct EventLogCard: View {
                 Label("最近活動", systemImage: "list.bullet.rectangle")
                     .font(.headline)
                 Spacer()
-                Text("最多保留 300 筆")
+                Text("目前帳號的最新封鎖記錄")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
-            if client.eventLog.isEmpty {
-                Text("尚無事件。啟動防護、掃描或管理名單後，操作紀錄會顯示在這裡。")
+            if !client.blockRecords.isEmpty {
+                ForEach(Array(client.blockRecords.prefix(12))) { record in
+                    HStack(alignment: .top, spacing: 8) {
+                        Circle().fill(.red).frame(width: 7, height: 7).padding(.top, 5)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text(record.name.isEmpty ? record.userID : record.name)
+                                    .font(.callout.weight(.medium))
+                                Text(record.source == "group" ? "群組" : "私訊")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(record.reason.isEmpty ? "未記錄原因" : record.reason)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                        Text(record.time.replacingOccurrences(of: "T", with: " "))
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            } else if client.eventLog.isEmpty {
+                Text("尚無封鎖活動。啟動防護、掃描或管理名單後，操作紀錄會顯示在這裡。")
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(Array(client.eventLog.suffix(12).reversed())) { event in
@@ -572,7 +598,7 @@ private struct ReportView: View {
             }
             .padding(28)
         }
-        .task { await client.buildReport(period: period) }
+        .task(id: client.selectedAccountID) { await client.buildReport(period: period) }
     }
 
     private func exportReport() {
@@ -657,7 +683,7 @@ private struct BlockRecordsView: View {
             .listStyle(.inset)
         }
         .padding(28)
-        .task { await client.fetchBlockRecords(query: query, source: source) }
+        .task(id: client.selectedAccountID) { await client.fetchBlockRecords(query: query, source: source) }
     }
 
     private func export(_ format: String) {
@@ -711,13 +737,32 @@ private struct SettingsView: View {
     var body: some View {
         Form {
             Section("啟動與防護") {
-                Toggle("登入系統時自動啟動 TeleShield", isOn: Binding(get: { client.startupEnabled }, set: { value in Task { await client.setStartup(value) } }))
-                Picker("自動啟動防護的帳號", selection: Binding(get: { client.details?.autoStartAccountID ?? "" }, set: { value in Task { await client.setAutoStart(accountID: value.isEmpty ? nil : value) } })) {
-                    Text("不自動啟動").tag("")
-                    ForEach(client.status?.accounts ?? []) { account in Text(account.label).tag(account.id) }
+                VStack(alignment: .leading, spacing: 10) {
+                    Toggle("登入系統時自動啟動 TeleShield", isOn: Binding<Bool>(get: { client.startupEnabled }, set: { value in Task { await client.setStartup(value) } }))
+                    Toggle("啟用自動啟動防護", isOn: Binding<Bool>(
+                        get: { !clientAutoStartAccountIDs.isEmpty },
+                        set: { enabled in
+                            let ids: [String] = enabled
+                                ? (clientAutoStartAccountIDs.isEmpty ? configuredAccountIDs : Array(clientAutoStartAccountIDs))
+                                : []
+                            Task { await client.setAutoStartAccounts(accountIDs: ids) }
+                        }
+                    ))
+                    .disabled(configuredAccountIDs.isEmpty)
+                    Text("勾選的 Telegram 帳號會在背景啟動時個別開始防護。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(client.status?.accounts ?? []) { account in
+                        Toggle(account.label, isOn: Binding<Bool>(
+                            get: { clientAutoStartAccountIDs.contains(account.id) },
+                            set: { enabled in updateAutoStart(accountID: account.id, enabled: enabled) }
+                        ))
+                        .help(account.configured ? account.accountIdentifier : "尚未登入")
+                        .disabled(!account.configured)
+                    }
+                    Text("關閉視窗只會隱藏到 Menu Bar，不會停止防護；要停止請使用防護頁或 Menu Bar。")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("關閉視窗只會隱藏到 Menu Bar，不會停止防護；要停止請使用防護頁或 Menu Bar。")
-                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("歷史掃描限制") {
                 ScanStepper(title: "私訊對話數", value: $settings.privateDialogLimit, range: 1...100)
@@ -766,6 +811,25 @@ private struct SettingsView: View {
             Button("確認全部刪除", role: .destructive) { Task { await client.clearSession(removeCredentials: true) } }
             Button("取消", role: .cancel) {}
         }
+    }
+
+    private var clientAutoStartAccountIDs: Set<String> {
+        Set(client.details?.autoStartAccountIDs ?? [])
+    }
+
+    private var configuredAccountIDs: [String] {
+        (client.status?.accounts ?? []).filter(\.configured).map(\.id)
+    }
+
+    private func updateAutoStart(accountID: String, enabled: Bool) {
+        var ids = clientAutoStartAccountIDs
+        if enabled {
+            ids.insert(accountID)
+        } else {
+            ids.remove(accountID)
+        }
+        let orderedIDs = (client.status?.accounts ?? []).map(\.id).filter { ids.contains($0) }
+        Task { await client.setAutoStartAccounts(accountIDs: orderedIDs) }
     }
 }
 
@@ -842,6 +906,8 @@ private struct LoginSheet: View {
                     Text("目前帳號：\(client.selectedAccount?.label ?? "尚未選取")").foregroundStyle(.secondary)
                 }
                 Spacer()
+                Link("MTProto API 註冊", destination: URL(string: "https://my.telegram.org/auth?to=apps")!)
+                    .font(.callout.weight(.semibold))
                 Button("關閉") { dismiss() }
             }
             Divider()
@@ -1123,17 +1189,14 @@ private struct EmptyPanel: View {
 
 struct MenuBarView: View {
     @ObservedObject var client: CoreClient
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("TeleShield").font(.headline)
             Text(client.connectionMessage).font(.caption).foregroundStyle(.secondary)
             Divider()
-            Button("開啟 TeleShield") {
-                NSApp.activate(ignoringOtherApps: true)
-                NSApp.windows.first { $0.isMiniaturized || !$0.isVisible }?.makeKeyAndOrderFront(nil)
-                NSApp.windows.first?.makeKeyAndOrderFront(nil)
-            }
+            Button("開啟 TeleShield") { openMainWindow() }
             if let account = client.selectedAccount, account.configured {
                 Button(account.running ? "停止防護" : "啟動防護") {
                     Task { if account.running { await client.stopProtection() } else { await client.startProtection() } }
@@ -1149,6 +1212,43 @@ struct MenuBarView: View {
         }
         .padding(12)
         .frame(width: 230)
+        .onReceive(NotificationCenter.default.publisher(for: .teleShieldOpenMainWindow)) { _ in
+            openMainWindow()
+        }
+    }
+
+    private func openMainWindow() {
+        let windows = NSApp.windows
+            .filter { $0.title == "TeleShield" && $0.styleMask.contains(.titled) }
+            .sorted { lhs, rhs in
+                if lhs.isVisible != rhs.isVisible { return lhs.isVisible }
+                return lhs.isKeyWindow && !rhs.isKeyWindow
+            }
+
+        if let mainWindow = windows.first {
+            // Reuse the existing SwiftUI window. Calling openWindow every time
+            // would create another WindowGroup instance instead of restoring it.
+            for duplicate in windows.dropFirst() {
+                duplicate.close()
+            }
+            reveal(mainWindow)
+            return
+        }
+
+        // The red close button may have removed the WindowGroup instance.
+        // Only create one when there is no existing main window at all.
+        openWindow(id: "main")
+        DispatchQueue.main.async {
+            if let mainWindow = NSApp.windows.first(where: { $0.title == "TeleShield" && $0.styleMask.contains(.titled) }) {
+                reveal(mainWindow)
+            }
+        }
+    }
+
+    private func reveal(_ window: NSWindow) {
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
     }
 }
 
@@ -1167,3 +1267,4 @@ private func savePanel(fileExtension: String, name: String) -> URL? {
     panel.allowedFileTypes = [fileExtension]
     return panel.runModal() == .OK ? panel.url : nil
 }
+

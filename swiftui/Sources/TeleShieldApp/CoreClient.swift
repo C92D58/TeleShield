@@ -36,7 +36,7 @@ final class CoreClient: ObservableObject {
     private var stdoutBuffer = Data()
     private var nextRequestID = 1
     private var pending: [Int: CheckedContinuation<Data, Error>] = [:]
-    private var backgroundStartupHandled = false
+    private var automaticProtectionHandled = false
     private var scanStartInFlight = false
     private var stdoutReadHandle: FileHandle?
     private var stderrReadHandle: FileHandle?
@@ -117,7 +117,7 @@ final class CoreClient: ObservableObject {
             await refreshAccountData()
             let startupData = try await request(method: "get_startup_status")
             startupEnabled = try decodeResult(StartupStatus.self, from: startupData).enabled
-            await handleBackgroundLaunchIfNeeded()
+            await startAutomaticProtectionIfNeeded()
         } catch {
             present(error: error)
         }
@@ -139,6 +139,11 @@ final class CoreClient: ObservableObject {
 
     func selectAccount(_ accountID: String) async {
         await runBusy("切換帳號") {
+            // Do not show the previous account's report or block records while
+            // the new account is being loaded.
+            self.report = nil
+            self.blockRecords = []
+            self.eventLog.removeAll()
             _ = try await self.request(method: "select_account", params: ["account_id": .string(accountID)])
             await self.refresh()
         }
@@ -195,13 +200,18 @@ final class CoreClient: ObservableObject {
         }
     }
 
-    func setAutoStart(accountID: String?) async {
+    func setAutoStartAccounts(accountIDs: [String]) async {
         do {
-            var params: [String: JSONValue] = [:]
-            if let accountID { params["account_id"] = .string(accountID) }
-            _ = try await request(method: "set_auto_start", params: params)
+            _ = try await request(
+                method: "set_auto_start",
+                params: ["account_ids": .array(accountIDs.map(JSONValue.string))]
+            )
             await refreshAccountData()
         } catch { present(error: error) }
+    }
+
+    func setAutoStart(accountID: String?) async {
+        await setAutoStartAccounts(accountIDs: accountID.map { [$0] } ?? [])
     }
 
     func setStartup(_ enabled: Bool) async {
@@ -356,10 +366,16 @@ final class CoreClient: ObservableObject {
 
     func buildReport(period: String) async {
         do {
-            var params = accountParams() ?? [:]
+            guard let accountID = selectedAccountID, !accountID.isEmpty else {
+                report = nil
+                return
+            }
+            var params = ["account_id": JSONValue.string(accountID)]
             params["period"] = .string(period)
             let data = try await request(method: "build_report", params: params)
-            report = try decodeResult(Report.self, from: data)
+            let nextReport = try decodeResult(Report.self, from: data)
+            guard selectedAccountID == accountID else { return }
+            report = nextReport
         } catch { present(error: error) }
     }
 
@@ -374,12 +390,18 @@ final class CoreClient: ObservableObject {
 
     func fetchBlockRecords(query: String = "", source: String = "all") async {
         do {
-            var params = accountParams() ?? [:]
+            guard let accountID = selectedAccountID, !accountID.isEmpty else {
+                blockRecords = []
+                return
+            }
+            var params = ["account_id": JSONValue.string(accountID)]
             params["query"] = .string(query)
             params["source"] = .string(source)
             params["limit"] = .int(500)
             let data = try await request(method: "get_block_records", params: params)
-            blockRecords = try decodeResult([BlockRecord].self, from: data)
+            let nextRecords = try decodeResult([BlockRecord].self, from: data)
+            guard selectedAccountID == accountID else { return }
+            blockRecords = nextRecords
         } catch { present(error: error) }
     }
 
@@ -525,15 +547,24 @@ final class CoreClient: ObservableObject {
         Task { await shutdownGracefully() }
     }
 
-    private func handleBackgroundLaunchIfNeeded() async {
-        guard !backgroundStartupHandled,
-              ProcessInfo.processInfo.arguments.contains("--background") else { return }
-        backgroundStartupHandled = true
-        guard let autoStartAccountID = details?.autoStartAccountID else { return }
-        if selectedAccountID != autoStartAccountID {
-            await selectAccount(autoStartAccountID)
+    private func startAutomaticProtectionIfNeeded() async {
+        // The account-level setting applies to every fresh app launch. The
+        // --background argument is only used to hide the window when macOS
+        // starts TeleShield at login; manual launches must run the same path.
+        guard !automaticProtectionHandled else { return }
+        automaticProtectionHandled = true
+        let autoStartAccountIDs = details?.autoStartAccountIDs ?? []
+        guard !autoStartAccountIDs.isEmpty else { return }
+        let originalAccountID = selectedAccountID
+        for accountID in autoStartAccountIDs {
+            if selectedAccountID != accountID {
+                await selectAccount(accountID)
+            }
+            await startProtection()
         }
-        await startProtection()
+        if let originalAccountID, selectedAccountID != originalAccountID {
+            await selectAccount(originalAccountID)
+        }
     }
 
     private func accountParams() -> [String: JSONValue]? {
@@ -719,3 +750,4 @@ private extension JSONEncoder {
         return encoder
     }
 }
+
