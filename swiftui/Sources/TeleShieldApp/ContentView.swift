@@ -1218,11 +1218,37 @@ struct MenuBarView: View {
     }
 
     private func openMainWindow() {
+        let windows = NSApp.windows
+            .filter { $0.title == "TeleShield" && $0.styleMask.contains(.titled) }
+            .sorted { lhs, rhs in
+                if lhs.isVisible != rhs.isVisible { return lhs.isVisible }
+                return lhs.isKeyWindow && !rhs.isKeyWindow
+            }
+
+        if let mainWindow = windows.first {
+            // Reuse the existing SwiftUI window. Calling openWindow every time
+            // would create another WindowGroup instance instead of restoring it.
+            for duplicate in windows.dropFirst() {
+                duplicate.close()
+            }
+            reveal(mainWindow)
+            return
+        }
+
+        // The red close button may have removed the WindowGroup instance.
+        // Only create one when there is no existing main window at all.
         openWindow(id: "main")
         DispatchQueue.main.async {
-            NSApp.activate(ignoringOtherApps: true)
-            NSApp.windows.first { $0.title == "TeleShield" }?.makeKeyAndOrderFront(nil)
+            if let mainWindow = NSApp.windows.first(where: { $0.title == "TeleShield" && $0.styleMask.contains(.titled) }) {
+                reveal(mainWindow)
+            }
         }
+    }
+
+    private func reveal(_ window: NSWindow) {
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
     }
 }
 
