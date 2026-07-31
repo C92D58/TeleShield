@@ -1,4 +1,3 @@
-sed: --: No such file or directory
 # TeleShield-UI
 
 TeleShield 的原生 macOS SwiftUI fork。這個分支以單一 Swift 執行體承載 UI、Telegram 協議、資料層與背景任務。
