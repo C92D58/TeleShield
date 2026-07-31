@@ -1,4 +1,4 @@
-name: Desktop test builds
+name: SwiftUI desktop builds
 
 on:
   workflow_dispatch:
@@ -12,110 +12,39 @@ permissions:
   contents: read
 
 jobs:
-  tests:
-    name: Python checks
-    runs-on: ubuntu-latest
+  native-source-check:
+    name: Native source checks
+    runs-on: macos-14
     steps:
       - name: Check out source
         uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-          cache-dependency-path: requirements-desktop.txt
-      - name: Install Qt runtime libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libegl1
-      - name: Install dependencies
-        run: python -m pip install -r requirements-desktop.txt pytest
-      - name: Compile Python sources
-        run: python -m compileall -q teleshield.py desktop_app.py desktop_platform.py core_service.py
-      - name: Run tests
-        run: python -m pytest -q
 
-  macos:
-    name: Build ${{ matrix.artifact_name }}
-    needs: tests
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15-intel
-            artifact_name: macOS-intel
-            file_name: macOS-intel.dmg
-          - runner: macos-14
-            artifact_name: macOS-arm
-            file_name: macOS-arm.dmg
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-          cache-dependency-path: requirements-desktop.txt
-      - name: Show runner architecture
-        run: uname -m
-      - name: Install Tesseract runtime dependencies
-        run: brew install tesseract tesseract-lang dylibbundler
-      - name: Install desktop dependencies
-        run: python -m pip install -r requirements-desktop.txt
-      - name: Bundle Chinese/English Tesseract runtime
-        run: scripts/bundle_tesseract_macos.sh build/tesseract-runtime
-      - name: Build application bundle
-        run: >-
-          python -m PyInstaller
-          --noconfirm
-          --clean
-          --windowed
-          --name TeleShield
-          --collect-data opencc
-          --add-data "build/tesseract-runtime:tesseract-runtime"
-          desktop_app.py
-      - name: Verify bundled OCR runtime inside app
+      - name: Assert native-only source tree
+        shell: bash
         run: |
-          TESSERACT_BIN="$(find dist/TeleShield.app -type f -path '*/tesseract-runtime/bin/tesseract' -print -quit)"
-          CHI_SIM_DATA="$(find dist/TeleShield.app -type f -path '*/tesseract-runtime/share/tessdata/chi_sim.traineddata' -print -quit)"
-          CHI_TRA_DATA="$(find dist/TeleShield.app -type f -path '*/tesseract-runtime/share/tessdata/chi_tra.traineddata' -print -quit)"
-          ENG_DATA="$(find dist/TeleShield.app -type f -path '*/tesseract-runtime/share/tessdata/eng.traineddata' -print -quit)"
-          test -n "$TESSERACT_BIN"
-          test -n "$CHI_SIM_DATA"
-          test -n "$CHI_TRA_DATA"
-          test -n "$ENG_DATA"
-          chmod 755 "$TESSERACT_BIN"
-          TESSDATA_PREFIX="$(dirname "$CHI_SIM_DATA")" "$TESSERACT_BIN" --list-langs
-      - name: Report unpacked app size
-        run: |
-          du -sh "dist/TeleShield.app"
-          du -sh "dist/TeleShield.app/Contents/Frameworks" || true
-      - name: Create unsigned DMG
-        env:
-          ARTIFACT_NAME: ${{ matrix.artifact_name }}
-        run: |
-          mkdir -p "dist/dmg-root"
-          cp -R "dist/TeleShield.app" "dist/dmg-root/TeleShield.app"
-          ln -s /Applications "dist/dmg-root/Applications"
-          hdiutil create \
-            -volname "TeleShield ${ARTIFACT_NAME}" \
-            -srcfolder "dist/dmg-root" \
-            -ov \
-            -format UDZO \
-            "dist/${{ matrix.file_name }}"
-      - name: Upload DMG artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: dist/${{ matrix.file_name }}
-          if-no-files-found: error
-          retention-days: 14
+          if rg --files -g '*.py' -g 'requirements*.txt' -g '*PySide*' -g '*Telethon*' -g '*sidecar*' -g '*tesseract*' . | grep -q .; then
+            echo "Legacy Python/PySide6/Telethon/sidecar artifacts remain in the source tree" >&2
+            exit 1
+          fi
+          if rg -n -i "pyside6|telethon|sidecar|json-rpc|json_rpc" . \
+            --glob '!swiftui/.build/**' \
+            --glob '!dist/**' \
+            --glob '!Package.resolved' \
+            --glob '!.github/**' \
+            --glob '!.git/**'; then
+            echo "Legacy desktop/sidecar references remain in source files" >&2
+            exit 1
+          fi
+
+      - name: Resolve Swift package
+        run: swift package resolve --package-path swiftui
+
+      - name: Check patch formatting
+        run: git diff --check
 
   macos-swiftui:
-    name: Build SwiftUI ${{ matrix.artifact_name }}
-    needs: tests
+    name: Test and build ${{ matrix.artifact_name }}
+    needs: native-source-check
     strategy:
       fail-fast: false
       matrix:
@@ -132,14 +61,15 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
-      - name: Run SwiftUI state tests
-        run: swift test --package-path swiftui
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-          cache-dependency-path: requirements-sidecar.txt
+
+      - name: Report runner and Apple toolchain
+        run: |
+          sw_vers
+          uname -a
+          xcodebuild -version
+          xcode-select -p
+          xcrun --find xctest
+
       - name: Assert runner architecture
         env:
           EXPECTED_ARCH: ${{ matrix.expected_arch }}
@@ -147,75 +77,77 @@ jobs:
           actual_arch="$(uname -m)"
           echo "Runner architecture: $actual_arch"
           test "$actual_arch" = "$EXPECTED_ARCH"
-      - name: Install Tesseract runtime dependencies
-        run: brew install tesseract tesseract-lang dylibbundler
-      - name: Install sidecar dependencies
-        run: python -m pip install -r requirements-sidecar.txt
-      - name: Bundle Chinese/English Tesseract runtime
-        run: scripts/bundle_tesseract_macos.sh build/tesseract-runtime
-      - name: Build SwiftUI application bundle
-        run: scripts/build_swiftui_macos.sh
-      - name: Verify helper architecture and self-test
-        env:
-          TELESHIELD_DATA_DIR: ${{ runner.temp }}/teleshield-data
-        run: |
-          APP="dist/TeleShieldSwiftUI.app"
-          CORE="$APP/Contents/Helpers/TeleShieldCore/TeleShieldCore"
-          lipo -archs "$APP/Contents/MacOS/TeleShieldApp"
-          lipo -archs "$CORE"
-          "$CORE" --self-test
-          printf '%s\n' \
-            '{"id":1,"method":"get_status"}' \
-            '{"id":2,"method":"get_ocr_status"}' \
-            '{"id":3,"method":"shutdown"}' \
-            | "$CORE" --stdio > "${RUNNER_TEMP}/teleshield-sidecar.jsonl"
-          python - "${RUNNER_TEMP}/teleshield-sidecar.jsonl" <<'PY'
-          import json
-          import pathlib
-          import sys
 
-          rows = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
-          assert [row["id"] for row in rows] == [1, 2, 3]
-          assert all(row["ok"] for row in rows)
-          assert isinstance(rows[0]["result"]["accounts"], list)
-          assert "available" in rows[1]["result"]
-          PY
-      - name: Verify bundled OCR runtime inside helper
+      - name: Resolve Swift package
+        run: swift package resolve --package-path swiftui
+
+      - name: Run XCTest suite
+        shell: bash
         run: |
-          ROOT="dist/TeleShieldSwiftUI.app/Contents/Helpers/TeleShieldCore"
-          TESSERACT_BIN="$(find "$ROOT" -type f -path '*/tesseract-runtime/bin/tesseract' -print -quit)"
-          CHI_SIM_DATA="$(find "$ROOT" -type f -path '*/tesseract-runtime/share/tessdata/chi_sim.traineddata' -print -quit)"
-          CHI_TRA_DATA="$(find "$ROOT" -type f -path '*/tesseract-runtime/share/tessdata/chi_tra.traineddata' -print -quit)"
-          ENG_DATA="$(find "$ROOT" -type f -path '*/tesseract-runtime/share/tessdata/eng.traineddata' -print -quit)"
-          test -n "$TESSERACT_BIN"
-          test -n "$CHI_SIM_DATA"
-          test -n "$CHI_TRA_DATA"
-          test -n "$ENG_DATA"
-          chmod 755 "$TESSERACT_BIN"
-          TESSDATA_PREFIX="$(dirname "$CHI_SIM_DATA")" "$TESSERACT_BIN" --list-langs
-      - name: Validate app metadata and report size
+          set -o pipefail
+          swift test \
+            --package-path swiftui \
+            -Xswiftc -strict-concurrency=complete \
+            -Xswiftc -warnings-as-errors \
+            2>&1 | tee "${RUNNER_TEMP}/swift-test-${{ matrix.artifact_name }}.log"
+
+      - name: Build Release app bundle
+        id: build-app
+        if: ${{ always() }}
+        run: scripts/build_swiftui_macos.sh
+
+      - name: Verify executable architecture and app metadata
+        id: verify-app
+        if: ${{ always() }}
+        env:
+          EXPECTED_ARCH: ${{ matrix.expected_arch }}
         run: |
+          executable="dist/TeleShieldSwiftUI.app/Contents/MacOS/TeleShieldApp"
+          architectures="$(lipo -archs "$executable")"
+          echo "App architectures: $architectures"
+          test "$architectures" = "$EXPECTED_ARCH"
           plutil -lint dist/TeleShieldSwiftUI.app/Contents/Info.plist
+          file "$executable"
           du -sh dist/TeleShieldSwiftUI.app
-          du -sh dist/TeleShieldSwiftUI.app/Contents/Helpers/TeleShieldCore
-      - name: Create unsigned SwiftUI DMG
+
+      - name: Zip app for manual testing
+        if: ${{ always() }}
+        run: |
+          if [ ! -d dist/TeleShieldSwiftUI.app ]; then
+            echo "App bundle is unavailable; preserving the XCTest log only."
+            exit 0
+          fi
+          ditto -c -k --sequesterRsrc --keepParent \
+            dist/TeleShieldSwiftUI.app \
+            "dist/${{ matrix.artifact_name }}.app.zip"
+
+      - name: Create unsigned DMG
+        if: ${{ always() }}
         env:
           ARTIFACT_NAME: ${{ matrix.artifact_name }}
         run: |
-          mkdir -p "dist/dmg-root"
-          cp -R "dist/TeleShieldSwiftUI.app" "dist/dmg-root/TeleShield.app"
-          ln -s /Applications "dist/dmg-root/Applications"
+          if [ ! -d dist/TeleShieldSwiftUI.app ]; then
+            echo "App bundle is unavailable; skipping DMG creation."
+            exit 0
+          fi
+          mkdir -p dist/dmg-root
+          cp -R dist/TeleShieldSwiftUI.app dist/dmg-root/TeleShield.app
+          ln -s /Applications dist/dmg-root/Applications
           hdiutil create \
-            -volname "TeleShield ${ARTIFACT_NAME}" \
-            -srcfolder "dist/dmg-root" \
+            -volname "TeleShield $ARTIFACT_NAME" \
+            -srcfolder dist/dmg-root \
             -ov \
             -format UDZO \
             "dist/${{ matrix.file_name }}"
-          stat -f 'DMG bytes: %z' "dist/${{ matrix.file_name }}"
-      - name: Upload SwiftUI DMG artifact
+
+      - name: Upload app, DMG, and XCTest log
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: dist/${{ matrix.file_name }}
-          if-no-files-found: error
+          path: |
+            dist/${{ matrix.file_name }}
+            dist/${{ matrix.artifact_name }}.app.zip
+            ${{ runner.temp }}/swift-test-${{ matrix.artifact_name }}.log
+          if-no-files-found: warn
           retention-days: 14

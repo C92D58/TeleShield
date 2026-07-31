@@ -1,10 +1,7 @@
-# Python
-__pycache__/
-*.py[cod]
-*.session
+# Local credentials and generated data
 .env
-
-# Session
+__pycache__/
+*.session
 .tg-sessions/
 config.json
 

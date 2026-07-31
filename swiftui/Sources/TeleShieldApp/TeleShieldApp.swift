@@ -38,8 +38,10 @@ struct TeleShieldApp: App {
         .commands {
             CommandGroup(replacing: .appTermination) {
                 Button("結束 TeleShield") {
-                    client.shutdown()
-                    NSApplication.shared.terminate(nil)
+                    Task {
+                        await client.shutdownGracefully()
+                        NSApplication.shared.terminate(nil)
+                    }
                 }
                 .keyboardShortcut("q")
             }
@@ -50,4 +52,3 @@ struct TeleShieldApp: App {
         }
     }
 }
-

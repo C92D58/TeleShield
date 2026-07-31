@@ -1,51 +1,5 @@
 import Foundation
 
-/// JSON values used by the line-delimited RPC bridge. This keeps booleans,
-/// numbers, arrays, and nested objects typed instead of stringifying them.
-enum JSONValue: Codable, Equatable {
-    case string(String)
-    case int(Int)
-    case double(Double)
-    case bool(Bool)
-    case object([String: JSONValue])
-    case array([JSONValue])
-    case null
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if container.decodeNil() {
-            self = .null
-        } else if let value = try? container.decode(Bool.self) {
-            self = .bool(value)
-        } else if let value = try? container.decode(Int.self) {
-            self = .int(value)
-        } else if let value = try? container.decode(Double.self) {
-            self = .double(value)
-        } else if let value = try? container.decode(String.self) {
-            self = .string(value)
-        } else if let value = try? container.decode([String: JSONValue].self) {
-            self = .object(value)
-        } else if let value = try? container.decode([JSONValue].self) {
-            self = .array(value)
-        } else {
-            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unsupported JSON value")
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        switch self {
-        case .string(let value): try container.encode(value)
-        case .int(let value): try container.encode(value)
-        case .double(let value): try container.encode(value)
-        case .bool(let value): try container.encode(value)
-        case .object(let value): try container.encode(value)
-        case .array(let value): try container.encode(value)
-        case .null: try container.encodeNil()
-        }
-    }
-}
-
 enum AuthenticationPresentation {
     static func shouldDismissLoginSheet(
         event: String,
@@ -125,6 +79,13 @@ struct ManagedGroup: Codable, Identifiable {
     let username: String
     let permission: String
     let enabled: Bool
+    /// Channel/supergroup references are retained separately from the UI
+    /// label.  A channel `access_hash` is required by
+    /// `updates.getChannelDifference`; looking it up from a truncated dialog
+    /// page each polling cycle is both expensive and unreliable.
+    let accessHash: Int64?
+    let isChannel: Bool
+    let isBroadcast: Bool
 
     var id: String { groupID }
 
@@ -134,14 +95,29 @@ struct ManagedGroup: Codable, Identifiable {
         case username
         case permission
         case enabled
+        case accessHash = "access_hash"
+        case isChannel = "is_channel"
+        case isBroadcast = "is_broadcast"
     }
 
-    init(groupID: String, title: String, username: String, permission: String, enabled: Bool) {
+    init(
+        groupID: String,
+        title: String,
+        username: String,
+        permission: String,
+        enabled: Bool,
+        accessHash: Int64? = nil,
+        isChannel: Bool = false,
+        isBroadcast: Bool = false
+    ) {
         self.groupID = groupID
         self.title = title
         self.username = username
         self.permission = permission
         self.enabled = enabled
+        self.accessHash = accessHash
+        self.isChannel = isChannel
+        self.isBroadcast = isBroadcast
     }
 
     init(from decoder: Decoder) throws {
@@ -157,6 +133,9 @@ struct ManagedGroup: Codable, Identifiable {
         username = (try? container.decode(String.self, forKey: .username)) ?? ""
         permission = (try? container.decode(String.self, forKey: .permission)) ?? ""
         enabled = (try? container.decode(Bool.self, forKey: .enabled)) ?? true
+        accessHash = try? container.decode(Int64.self, forKey: .accessHash)
+        isChannel = (try? container.decode(Bool.self, forKey: .isChannel)) ?? false
+        isBroadcast = (try? container.decode(Bool.self, forKey: .isBroadcast)) ?? false
     }
 }
 
@@ -185,6 +164,17 @@ struct ScanSettings: Codable {
         groupMessageLimit: 20,
         groupDays: 3
     )
+
+    var normalized: ScanSettings {
+        ScanSettings(
+            privateDialogLimit: min(max(privateDialogLimit, 1), 100),
+            privateMessageLimit: min(max(privateMessageLimit, 1), 100),
+            privateDays: min(max(privateDays, 1), 365),
+            groupDialogLimit: min(max(groupDialogLimit, 1), 100),
+            groupMessageLimit: min(max(groupMessageLimit, 1), 100),
+            groupDays: min(max(groupDays, 1), 365)
+        )
+    }
 }
 
 struct LearnedPatterns: Codable {
@@ -218,54 +208,6 @@ struct AccountDetails: Codable {
     }
 }
 
-struct ProtectionActionResult: Codable {
-    let accountID: String?
-    let running: Bool
-    let ready: Bool?
-    let state: String?
-
-    enum CodingKeys: String, CodingKey {
-        case accountID = "account_id"
-        case running
-        case ready
-        case state
-    }
-}
-
-struct AuthStartResult: Codable {
-    let flowID: String
-    let accountID: String?
-    let running: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case flowID = "flow_id"
-        case accountID = "account_id"
-        case running
-    }
-}
-
-struct AuthSubmissionResult: Codable {
-    let flowID: String
-    let accepted: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case flowID = "flow_id"
-        case accepted
-    }
-}
-
-struct JobStartResult: Codable {
-    let jobID: String
-    let accountID: String?
-    let running: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case jobID = "job_id"
-        case accountID = "account_id"
-        case running
-    }
-}
-
 struct ListEntry: Codable, Identifiable {
     let userID: String
     let username: String
@@ -273,6 +215,13 @@ struct ListEntry: Codable, Identifiable {
     let reason: String
 
     var id: String { userID }
+
+    init(userID: String, username: String, added: String, reason: String) {
+        self.userID = userID
+        self.username = username
+        self.added = added
+        self.reason = reason
+    }
 
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
@@ -303,7 +252,15 @@ struct BlockRecord: Codable, Identifiable {
     let name: String
     let reason: String
 
-    var id: String { "\(time)-\(userID)-\(name)" }
+    var id: String { "\(time)-\(source)-\(userID)-\(name)-\(reason)" }
+
+    init(time: String, source: String, userID: String, name: String, reason: String) {
+        self.time = time
+        self.source = source
+        self.userID = userID
+        self.name = name
+        self.reason = reason
+    }
 
     enum CodingKeys: String, CodingKey {
         case time
@@ -336,6 +293,13 @@ struct ScanFinding: Codable, Identifiable {
     let reason: String
 
     var id: String { "\(userID)-\(group ?? "")-\(reason)" }
+
+    init(userID: String, name: String, group: String?, reason: String) {
+        self.userID = userID
+        self.name = name
+        self.group = group
+        self.reason = reason
+    }
 
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
@@ -405,24 +369,6 @@ struct Report: Codable {
         case trend
         case records
     }
-}
-
-struct RPCErrorPayload: Codable {
-    let type: String
-    let message: String
-}
-
-struct RPCResponse<Result: Decodable>: Decodable {
-    let id: Int?
-    let ok: Bool
-    let result: Result?
-    let error: RPCErrorPayload?
-}
-
-struct RPCRequest: Encodable {
-    let id: Int
-    let method: String
-    let params: [String: JSONValue]?
 }
 
 struct CoreClientError: LocalizedError {

@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+@preconcurrency import ServiceManagement
 
 @MainActor
 final class CoreClient: ObservableObject {
@@ -12,13 +13,11 @@ final class CoreClient: ObservableObject {
     @Published private(set) var eventLog: [EventLogEntry] = []
     @Published private(set) var isBusy = false
     @Published private(set) var busyOperation: String?
-
     @Published private(set) var authFlowID: String?
     @Published private(set) var authChallengeKind: String?
     @Published private(set) var authDeliveryMessage = ""
     @Published private(set) var authInProgress = false
     @Published private(set) var authenticatedAccountID: String?
-
     @Published private(set) var whitelist: [ListEntry] = []
     @Published private(set) var blacklist: [ListEntry] = []
     @Published private(set) var learnedPatterns = LearnedPatterns.empty
@@ -31,134 +30,148 @@ final class CoreClient: ObservableObject {
     @Published private(set) var scanResult: ScanResult?
     @Published private(set) var operationJobID: String?
 
-    private var process: Process?
-    private var inputHandle: FileHandle?
-    private var stdoutBuffer = Data()
-    private var nextRequestID = 1
-    private var pending: [Int: CheckedContinuation<Data, Error>] = [:]
-    private var automaticProtectionHandled = false
+    private struct AuthContext {
+        let flowID: String
+        let accountID: String
+        let phone: String
+        let phoneCodeHash: String
+        let api: TelegramAPI
+        var challenge: TelegramPasswordChallenge?
+    }
+
+    private let store: TeleShieldStore
+    private var apis: [String: TelegramAPI] = [:]
+    private var coordinators: [String: ProtectionCoordinator] = [:]
+    private var runningAccountIDs = Set<String>()
+    private var startingAccountIDs = Set<String>()
+    private var authContext: AuthContext?
+    private var authRequestID: UUID?
+    private var pendingAuthenticationAPI: TelegramAPI?
+    private var serviceStarted = false
+    private var automaticProtectionRetryAt: [String: Date] = [:]
     private var scanStartInFlight = false
-    private var stdoutReadHandle: FileHandle?
-    private var stderrReadHandle: FileHandle?
+    private var scanTask: Task<Void, Never>?
+    private var refreshInFlight = false
+    private var refreshRequested = false
+    private var lifecycleGeneration = 0
+
+    init(store: TeleShieldStore = TeleShieldStore()) {
+        self.store = store
+    }
 
     var selectedAccount: AccountSummary? { status?.selectedAccount }
     var selectedAccountID: String? { status?.activeAccountID ?? status?.selectedAccount.accountID }
-    var helperIsRunning: Bool { process?.isRunning == true }
-    var hasActiveScan: Bool { scanJobID != nil || scanStartInFlight }
+    var helperIsRunning: Bool { serviceStarted }
+    var hasActiveScan: Bool { scanTask != nil || scanJobID != nil || scanStartInFlight }
     var canModifySelectedAccount: Bool {
         guard let selectedAccount else { return false }
         return !selectedAccount.running && !authInProgress && operationJobID == nil
     }
 
     func launch() {
-        guard process == nil else { return }
-        guard let helperPath = resolveHelperPath() else {
-            errorMessage = "找不到 TeleShieldCore。請從 DMG 啟動完整的 TeleShield.app。"
-            connectionMessage = "sidecar 不存在"
-            return
-        }
-
-        let stdinPipe = Pipe()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        let child = Process()
-        child.executableURL = URL(fileURLWithPath: helperPath)
-        child.arguments = ["--stdio"]
-        var environment = ProcessInfo.processInfo.environment
-        environment["PYTHONUNBUFFERED"] = "1"
-        environment["TELESHIELD_STARTUP_APP"] = Bundle.main.bundlePath
-        child.environment = environment
-        child.standardInput = stdinPipe
-        child.standardOutput = stdoutPipe
-        child.standardError = stderrPipe
-
-        let stdoutReadHandle = stdoutPipe.fileHandleForReading
-        let stderrReadHandle = stderrPipe.fileHandleForReading
-        self.stdoutReadHandle = stdoutReadHandle
-        self.stderrReadHandle = stderrReadHandle
-        stdoutReadHandle.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            Task { @MainActor [weak self] in self?.consume(data) }
-        }
-        stderrReadHandle.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            let message = String(data: data, encoding: .utf8) ?? "sidecar stderr"
-            Task { @MainActor [weak self] in self?.appendLog(message, level: "stderr") }
-        }
-        child.terminationHandler = { [weak self] terminatedProcess in
-            let status = terminatedProcess.terminationStatus
-            Task { @MainActor [weak self] in self?.sidecarTerminated(exitCode: status) }
-        }
-
-        do {
-            try child.run()
-        } catch {
-            errorMessage = "無法啟動 Python sidecar：\(error.localizedDescription)"
-            connectionMessage = "sidecar 啟動失敗"
-            return
-        }
-
-        process = child
-        inputHandle = stdinPipe.fileHandleForWriting
-        connectionMessage = "sidecar 已啟動"
+        guard !serviceStarted else { return }
+        serviceStarted = true
+        lifecycleGeneration &+= 1
+        connectionMessage = "原生 Swift 服務已啟動"
         errorMessage = nil
         Task { [weak self] in await self?.refresh() }
     }
 
     func refresh() async {
-        guard helperIsRunning else { return }
+        guard serviceStarted else { return }
+        let generation = lifecycleGeneration
+        guard !refreshInFlight else {
+            refreshRequested = true
+            return
+        }
+        refreshInFlight = true
+        defer {
+            refreshInFlight = false
+            if refreshRequested && serviceStarted {
+                refreshRequested = false
+                Task { @MainActor [weak self] in await self?.refresh() }
+            } else {
+                refreshRequested = false
+            }
+        }
         do {
-            let data = try await request(method: "get_status")
-            status = try decodeResult(CoreStatus.self, from: data)
+            try await store.ensureRoot()
+            guard serviceStarted, lifecycleGeneration == generation else { return }
+            var accounts = try await store.listAccounts()
+            if accounts.isEmpty {
+                _ = try await store.createAccount()
+                accounts = try await store.listAccounts()
+            }
+            guard serviceStarted, lifecycleGeneration == generation else { return }
+            let storedActiveID = try await store.activeAccountID()
+            let activeID = storedActiveID ?? accounts.first?.id
+            if let activeID, storedActiveID == nil {
+                _ = try await store.selectAccount(activeID)
+            }
+            guard serviceStarted, lifecycleGeneration == generation else { return }
+            try await rebuildStatus(accounts: accounts, activeAccountID: activeID, expectedGeneration: generation)
+            guard serviceStarted, lifecycleGeneration == generation else { return }
             connectionMessage = "已連線"
             errorMessage = nil
-            await refreshAccountData()
-            let startupData = try await request(method: "get_startup_status")
-            startupEnabled = try decodeResult(StartupStatus.self, from: startupData).enabled
-            await startAutomaticProtectionIfNeeded()
+            await refreshAccountData(expectedGeneration: generation)
+            guard serviceStarted, lifecycleGeneration == generation else { return }
+            await startAutomaticProtectionIfNeeded(expectedGeneration: generation)
         } catch {
+            guard serviceStarted, lifecycleGeneration == generation else { return }
             present(error: error)
         }
     }
 
-    func refreshAccountData() async {
-        guard helperIsRunning else { return }
+    func refreshAccountData(expectedGeneration: Int? = nil) async {
+        guard serviceStarted, let accountID = selectedAccountID else { return }
+        let generation = expectedGeneration ?? lifecycleGeneration
         do {
-            let data = try await request(method: "get_account_details", params: accountParams())
-            let details = try decodeResult(AccountDetails.self, from: data)
-            self.details = details
-            scanSettings = details.scanSettings
-            learnedPatterns = details.learnedPatterns
-            groups = details.managedGroups
+            let config = try await store.configuration(accountID: accountID)
+            let autoIDs = try await store.autoStartAccountIDs()
+            let records = try await store.blockRecords(accountID: accountID)
+            guard serviceStarted,
+                  lifecycleGeneration == generation,
+                  selectedAccountID == accountID else { return }
+            let nextDetails = AccountDetails(
+                accountID: accountID,
+                loggedIn: config.userID != nil,
+                hasAPICredentials: config.apiID != nil && !config.apiHash.isEmpty,
+                managedGroups: config.managedGroups,
+                scanSettings: config.scanSettings,
+                learnedPatterns: config.learnedPatterns,
+                autoStart: autoIDs.contains(accountID),
+                autoStartAccountID: autoIDs.first,
+                autoStartAccountIDs: autoIDs
+            )
+            details = nextDetails
+            scanSettings = config.scanSettings
+            learnedPatterns = config.learnedPatterns
+            groups = config.managedGroups
+            whitelist = config.whitelist.values.sorted { $0.userID < $1.userID }
+            blacklist = config.blacklist.values.sorted { $0.userID < $1.userID }
+            blockRecords = records
         } catch {
+            guard serviceStarted, lifecycleGeneration == generation, selectedAccountID == accountID else { return }
             present(error: error)
         }
     }
 
     func selectAccount(_ accountID: String) async {
         await runBusy("切換帳號") {
-            // Do not show the previous account's report or block records while
-            // the new account is being loaded.
+            _ = try await self.store.selectAccount(accountID)
             self.report = nil
             self.blockRecords = []
             self.eventLog.removeAll()
-            _ = try await self.request(method: "select_account", params: ["account_id": .string(accountID)])
             await self.refresh()
         }
     }
 
     func createAccount() async -> String? {
         do {
-            let data = try await request(method: "create_account")
-            let result = try decodeResult(JSONValue.self, from: data)
-            guard case .object(let object) = result, case .string(let accountID)? = object["id"] else {
-                throw CoreClientError(message: "新增帳號回傳缺少 id")
-            }
+            let account = try await store.createAccount()
             await refresh()
-            await selectAccount(accountID)
-            return accountID
+            await selectAccount(account.id)
+            return account.id
         } catch {
             present(error: error)
             return nil
@@ -171,10 +184,9 @@ final class CoreClient: ObservableObject {
         busyOperation = "移除帳號"
         defer { isBusy = false; busyOperation = nil }
         do {
-            _ = try await request(
-                method: "remove_account",
-                params: ["account_id": .string(accountID), "delete_files": .bool(deleteFiles)]
-            )
+            await stopProtection(for: accountID)
+            if let api = apis.removeValue(forKey: accountID) { await api.disconnect() }
+            try await store.removeAccount(accountID, deleteFiles: deleteFiles)
             await refresh()
             return true
         } catch {
@@ -184,10 +196,15 @@ final class CoreClient: ObservableObject {
     }
 
     func startAll() async {
-        guard let accounts = status?.accounts else { return }
         await runBusy("啟動全部帳號") {
-            for account in accounts where account.configured && !account.running {
-                _ = try await self.request(method: "start_protection", params: ["account_id": .string(account.id)])
+            for account in try await self.store.listAccounts() where account.isConfigured {
+                if !self.runningAccountIDs.contains(account.id) {
+                    do {
+                        try await self.startProtection(accountID: account.id)
+                    } catch {
+                        self.appendLog("啟動 \(account.label) 失敗：\(error.localizedDescription)", level: "error")
+                    }
+                }
             }
             await self.refresh()
         }
@@ -195,17 +212,16 @@ final class CoreClient: ObservableObject {
 
     func stopAll() async {
         await runBusy("停止全部帳號") {
-            _ = try await self.request(method: "stop_all")
+            for accountID in Array(self.runningAccountIDs) {
+                await self.stopProtection(for: accountID)
+            }
             await self.refresh()
         }
     }
 
     func setAutoStartAccounts(accountIDs: [String]) async {
         do {
-            _ = try await request(
-                method: "set_auto_start",
-                params: ["account_ids": .array(accountIDs.map(JSONValue.string))]
-            )
+            try await store.setAutoStartAccountIDs(accountIDs)
             await refreshAccountData()
         } catch { present(error: error) }
     }
@@ -216,360 +232,750 @@ final class CoreClient: ObservableObject {
 
     func setStartup(_ enabled: Bool) async {
         do {
-            let data = try await request(method: "set_startup", params: ["enabled": .bool(enabled)])
-            startupEnabled = try decodeResult(StartupStatus.self, from: data).enabled
-        } catch { present(error: error) }
+            if enabled { try SMAppService.mainApp.register() }
+            else { try await SMAppService.mainApp.unregister() }
+            UserDefaults.standard.set(enabled, forKey: "teleShield.startupEnabled")
+            startupEnabled = enabled
+            appendLog(enabled ? "已啟用登入時啟動" : "已停用登入時啟動", level: "info")
+        } catch {
+            present(error: error)
+        }
     }
 
-    func startProtection() async { await performProtectionAction("start_protection") }
-    func stopProtection() async { await performProtectionAction("stop_protection") }
+    func startProtection() async {
+        guard let accountID = selectedAccountID else { return }
+        await runBusy("啟動防護") {
+            try await self.startProtection(accountID: accountID)
+            await self.refresh()
+        }
+    }
 
-    private func performProtectionAction(_ method: String) async {
-        await runBusy(method == "start_protection" ? "啟動防護" : "停止防護") {
-            _ = try await self.request(method: method, params: self.accountParams())
+    func stopProtection() async {
+        guard let accountID = selectedAccountID else { return }
+        await runBusy("停止防護") {
+            await self.stopProtection(for: accountID)
             await self.refresh()
         }
     }
 
     func startAuthentication(apiID: String, apiHash: String, phone: String, accountID: String? = nil) async {
-        guard let numericAPIID = Int(apiID.trimmingCharacters(in: .whitespacesAndNewlines)), numericAPIID > 0 else {
-            errorMessage = "API ID 必須是正整數"
+        guard let numericAPIID = Int(apiID.trimmingCharacters(in: .whitespacesAndNewlines)),
+              numericAPIID > 0,
+              numericAPIID <= Int(Int32.max) else {
+            errorMessage = "API ID 必須是 Int32 範圍內的正整數"
             return
         }
-        guard !apiHash.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !phone.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        let normalizedHash = apiHash.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedPhone = phone.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedHash.isEmpty, !normalizedPhone.isEmpty else {
             errorMessage = "API Hash 與手機號碼不可為空"
             return
         }
+        if authContext != nil || pendingAuthenticationAPI != nil {
+            await cancelAuthentication()
+        }
+        let requestID = UUID()
+        authRequestID = requestID
         isBusy = true
         authInProgress = true
-        authenticatedAccountID = nil
         errorMessage = nil
-        defer { isBusy = false }
+        defer {
+            if authRequestID == requestID {
+                pendingAuthenticationAPI = nil
+                isBusy = false
+            }
+        }
         do {
-            var params: [String: JSONValue] = [
-                "api_id": .int(numericAPIID),
-                "api_hash": .string(apiHash),
-                "phone": .string(phone),
-            ]
-            if let accountID { params["account_id"] = .string(accountID) }
-            let data = try await request(method: "start_auth", params: params)
-            let result = try decodeResult(AuthStartResult.self, from: data)
-            authFlowID = result.flowID
-            connectionMessage = "等待 Telegram 驗證"
+            let targetID: String
+            if let accountID { targetID = accountID }
+            else { targetID = try await store.createAccount().id }
+            guard authRequestID == requestID, authInProgress else { throw CancellationError() }
+            try await store.updateConfiguration(accountID: targetID) { config in
+                config.apiID = numericAPIID
+                config.apiHash = normalizedHash
+                config.phone = normalizedPhone
+            }
+            guard authRequestID == requestID, authInProgress else { throw CancellationError() }
+            let api = TelegramAPI(apiID: numericAPIID, apiHash: normalizedHash)
+            pendingAuthenticationAPI = api
+            let sentCode = try await api.sendCode(phone: normalizedPhone)
+            try Task.checkCancellation()
+            guard authRequestID == requestID, authInProgress else { throw CancellationError() }
+            let flowID = UUID().uuidString
+            authContext = AuthContext(flowID: flowID, accountID: targetID, phone: normalizedPhone, phoneCodeHash: sentCode.phoneCodeHash, api: api, challenge: nil)
+            pendingAuthenticationAPI = nil
+            authFlowID = flowID
+            authChallengeKind = "code"
+            authDeliveryMessage = "驗證碼已透過 \(sentCode.deliveryDescription) 發送"
+            connectionMessage = "等待 Telegram 驗證碼"
+            appendLog(authDeliveryMessage, level: "info")
+        } catch is CancellationError {
+            if authRequestID == requestID {
+                let pendingAPI = pendingAuthenticationAPI
+                pendingAuthenticationAPI = nil
+                authRequestID = nil
+                if let pendingAPI { await pendingAPI.disconnect() }
+                authContext = nil
+                authFlowID = nil
+                authChallengeKind = nil
+                authInProgress = false
+                isBusy = false
+            }
         } catch {
+            guard authRequestID == requestID, authInProgress else {
+                return
+            }
+            let pendingAPI = pendingAuthenticationAPI
+            pendingAuthenticationAPI = nil
+            authRequestID = nil
+            if let pendingAPI { await pendingAPI.disconnect() }
             authInProgress = false
+            isBusy = false
             present(error: error)
         }
     }
 
-    func submitAuthCode(_ value: String) async { await submitAuthValue(value, method: "submit_auth_code") }
-    func submitAuthPassword(_ value: String) async { await submitAuthValue(value, method: "submit_auth_password") }
-
-    func cancelAuthentication() async {
-        guard let flowID = authFlowID else { return }
+    func submitAuthCode(_ value: String) async {
+        guard let context = authContext, context.challenge == nil else { return }
         do {
-            _ = try await request(method: "cancel_auth", params: ["flow_id": .string(flowID)])
-            for _ in 0..<20 {
-                if authFlowID != flowID { break }
-                try? await Task.sleep(nanoseconds: 100_000_000)
+            let user = try await context.api.signIn(phone: context.phone, phoneCodeHash: phoneCodeHash(from: context), code: value)
+            try await completeAuthentication(context: context, user: user)
+        } catch let error as TelegramMTProtoError {
+            if case let .rpc(_, message) = error, message.contains("SESSION_PASSWORD_NEEDED") {
+                do {
+                    var next = context
+                    next.challenge = try await context.api.passwordChallenge()
+                    guard authContextIsCurrent(context) else { return }
+                    authContext = next
+                    authChallengeKind = "password"
+                    connectionMessage = "需要 Telegram 兩步驟驗證"
+                    if let hint = next.challenge?.hint, !hint.isEmpty {
+                        authDeliveryMessage = "提示：\(hint)"
+                    } else {
+                        authDeliveryMessage = "請輸入 Telegram 兩步驟密碼"
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard authContextIsCurrent(context) else { return }
+                    present(error: error)
+                }
+            } else {
+                guard authContextIsCurrent(context) else { return }
+                present(error: error)
             }
-        } catch { present(error: error) }
-        authInProgress = false
-        self.authFlowID = nil
-        authChallengeKind = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            guard authContextIsCurrent(context) else { return }
+            present(error: error)
+        }
     }
 
-    private func submitAuthValue(_ value: String, method: String) async {
-        guard let authFlowID, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    func submitAuthPassword(_ value: String) async {
+        guard let context = authContext, let challenge = context.challenge else { return }
         do {
-            _ = try await request(method: method, params: ["flow_id": .string(authFlowID), "value": .string(value)])
-        } catch { present(error: error) }
+            let user = try await context.api.checkPassword(challenge, password: value)
+            try await completeAuthentication(context: context, user: user)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard authContextIsCurrent(context) else { return }
+            present(error: error)
+        }
+    }
+
+    func cancelAuthentication() async {
+        authRequestID = nil
+        let pendingAPI = pendingAuthenticationAPI
+        pendingAuthenticationAPI = nil
+        if let pendingAPI { await pendingAPI.disconnect() }
+        if let context = authContext { await context.api.disconnect() }
+        authContext = nil
+        authFlowID = nil
+        authChallengeKind = nil
+        authInProgress = false
+        isBusy = false
+        connectionMessage = "已取消登入"
     }
 
     func fetchList(_ listType: String, query: String = "") async {
+        guard isSupportedListType(listType) else { return }
+        guard let accountID = selectedAccountID else { return }
         do {
-            let data = try await request(method: "list_entries", params: [
-                "list_type": .string(listType),
-                "query": .string(query),
-            ].merging(accountParams() ?? [:]) { _, new in new })
-            let rows = try decodeResult([ListEntry].self, from: data)
-            if listType == "whitelist" { whitelist = rows } else { blacklist = rows }
+            let config = try await store.configuration(accountID: accountID)
+            let source = listType == "whitelist" ? config.whitelist.values : config.blacklist.values
+            let normalized = query.lowercased()
+            let result = source.filter { query.isEmpty || "\($0.userID) \($0.username) \($0.reason)".lowercased().contains(normalized) }.sorted { $0.userID < $1.userID }
+            if listType == "whitelist" { whitelist = result } else { blacklist = result }
         } catch { present(error: error) }
     }
 
     func upsertList(_ listType: String, userID: String, username: String, reason: String) async {
+        guard isSupportedListType(listType) else { return }
+        guard let accountID = selectedAccountID else { return }
         do {
-            var params = accountParams() ?? [:]
-            params["list_type"] = .string(listType)
-            params["user_id"] = .string(userID)
-            params["username"] = .string(username)
-            params["reason"] = .string(reason)
-            _ = try await request(method: "upsert_list_entry", params: params)
+            let normalizedUserID = try normalizedTelegramUserID(userID)
+            try await store.updateConfiguration(accountID: accountID) { config in
+                let existing = listType == "whitelist" ? config.whitelist[normalizedUserID] : config.blacklist[normalizedUserID]
+                let normalizedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines).drop(while: { $0 == "@" })
+                let normalizedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+                let entry = ListEntry(
+                    userID: normalizedUserID,
+                    username: String(normalizedUsername),
+                    added: existing?.added.isEmpty == false ? existing!.added : ISO8601DateFormatter().string(from: Date()),
+                    reason: normalizedReason.isEmpty ? (existing?.reason.isEmpty == false ? existing!.reason : "manual") : normalizedReason
+                )
+                if listType == "whitelist" { config.whitelist[normalizedUserID] = entry }
+                else { config.blacklist[normalizedUserID] = entry }
+            }
             await fetchList(listType)
             await refresh()
         } catch { present(error: error) }
     }
 
     func removeListEntry(_ listType: String, userID: String) async {
+        guard isSupportedListType(listType) else { return }
+        guard let accountID = selectedAccountID else { return }
         do {
-            var params = accountParams() ?? [:]
-            params["list_type"] = .string(listType)
-            params["user_id"] = .string(userID)
-            _ = try await request(method: "remove_list_entry", params: params)
+            try await store.updateConfiguration(accountID: accountID) { config in
+                if listType == "whitelist" { config.whitelist.removeValue(forKey: userID) }
+                else { config.blacklist.removeValue(forKey: userID) }
+            }
             await fetchList(listType)
             await refresh()
         } catch { present(error: error) }
     }
 
     func importList(_ listType: String, path: String, replace: Bool) async {
+        guard isSupportedListType(listType) else { return }
+        guard let accountID = selectedAccountID else { return }
         do {
-            var params = accountParams() ?? [:]
-            params["list_type"] = .string(listType)
-            params["path"] = .string(path)
-            params["replace"] = .bool(replace)
-            _ = try await request(method: "import_list", params: params)
+            let data = try Data(contentsOf: URL(fileURLWithPath: path))
+            let url = URL(fileURLWithPath: path)
+            let entries: [ListEntry]
+            if url.pathExtension.lowercased() == "csv" {
+                entries = parseCSV(data: data).compactMap { row in
+                    guard let userID = row["user_id"], !userID.isEmpty else { return nil }
+                    return ListEntry(userID: userID, username: row["username"] ?? "", added: row["added"] ?? "", reason: row["reason"] ?? "import")
+                }
+            } else {
+                if let array = try? JSONDecoder().decode([ListEntry].self, from: data) {
+                    entries = array
+                } else {
+                    let dictionary = try JSONDecoder().decode([String: ListEntry].self, from: data)
+                    entries = dictionary.map { key, value in
+                        ListEntry(userID: value.userID.isEmpty ? key : value.userID, username: value.username, added: value.added, reason: value.reason)
+                    }
+                }
+            }
+            try await store.updateConfiguration(accountID: accountID) { config in
+                var values = replace ? [:] : (listType == "whitelist" ? config.whitelist : config.blacklist)
+                for entry in entries {
+                    guard let normalizedID = try? normalizedTelegramUserID(entry.userID) else { continue }
+                    let sanitized = ListEntry(
+                        userID: normalizedID,
+                        username: String(entry.username.trimmingCharacters(in: .whitespacesAndNewlines).drop(while: { $0 == "@" })),
+                        added: entry.added,
+                        reason: entry.reason.isEmpty ? "import" : entry.reason
+                    )
+                    values[normalizedID] = sanitized
+                }
+                if listType == "whitelist" { config.whitelist = values }
+                else { config.blacklist = values }
+            }
             await fetchList(listType)
             await refresh()
         } catch { present(error: error) }
     }
 
     func exportList(_ listType: String, path: String, format: String) async {
+        guard isSupportedListType(listType) else { return }
         do {
-            var params = accountParams() ?? [:]
-            params["list_type"] = .string(listType)
-            params["path"] = .string(path)
-            params["fmt"] = .string(format)
-            _ = try await request(method: "export_list", params: params)
-            appendLog("已匯出 \(listType) 名單", level: "info")
+            let values = listType == "whitelist" ? whitelist : blacklist
+            let data: Data
+            if format.lowercased() == "csv" || URL(fileURLWithPath: path).pathExtension.lowercased() == "csv" {
+                let rows = values.map { [$0.userID, $0.username, $0.added, $0.reason] }
+                data = Data(csv(header: ["user_id", "username", "added", "reason"], rows: rows).utf8)
+            } else {
+                data = try JSONEncoder.pretty.encode(values)
+            }
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            appendLog("已匯出 \(listType) 名單（\(format.uppercased())）", level: "info")
         } catch { present(error: error) }
     }
 
     func learn(_ text: String) async {
+        guard let accountID = selectedAccountID else { return }
         do {
-            var params = accountParams() ?? [:]
-            params["text"] = .string(text)
-            _ = try await request(method: "learn_text", params: params)
+            let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else {
+                errorMessage = "請提供要學習的廣告文字"
+                return
+            }
+            _ = try await store.updateLearnedPatterns(accountID: accountID) { patterns in
+                patterns = SpamRuleEngine.learn(from: value, existing: patterns)
+            }
             await refreshAccountData()
         } catch { present(error: error) }
     }
 
     func removeLearnedPattern(kind: String, value: String) async {
+        guard let accountID = selectedAccountID else { return }
         do {
-            var params = accountParams() ?? [:]
-            params["kind"] = .string(kind)
-            params["value"] = .string(value)
-            _ = try await request(method: "remove_learned_pattern", params: params)
+            _ = try await store.updateLearnedPatterns(accountID: accountID) { patterns in
+                if kind == "keyword" || kind == "keywords" { patterns.keywords.removeAll { $0 == value } }
+                else { patterns.patterns.removeAll { $0 == value } }
+            }
             await refreshAccountData()
         } catch { present(error: error) }
     }
 
     func buildReport(period: String) async {
+        guard let accountID = selectedAccountID else { return }
         do {
-            guard let accountID = selectedAccountID, !accountID.isEmpty else {
-                report = nil
-                return
+            let normalizedPeriod = ["day", "week", "all"].contains(period) ? period : "day"
+            let label: String
+            let cutoff: Date?
+            switch normalizedPeriod {
+            case "week": label = "過去 7 天"; cutoff = Date().addingTimeInterval(-7 * 86_400)
+            case "all": label = "全部記錄"; cutoff = nil
+            default: label = "過去 24 小時"; cutoff = Date().addingTimeInterval(-86_400)
             }
-            var params = ["account_id": JSONValue.string(accountID)]
-            params["period"] = .string(period)
-            let data = try await request(method: "build_report", params: params)
-            let nextReport = try decodeResult(Report.self, from: data)
-            guard selectedAccountID == accountID else { return }
-            report = nextReport
+            let allRecords = try await store.blockRecords(accountID: accountID, limit: 500)
+            let records = allRecords.filter { record in
+                guard let cutoff else { return true }
+                guard let date = ISO8601DateFormatter().date(from: record.time) else { return false }
+                return date >= cutoff
+            }
+            let bySource = Dictionary(grouping: records, by: { $0.source == "scan" ? "private" : $0.source }).mapValues(\.count)
+            let byReason = Dictionary(grouping: records, by: { String($0.reason.prefix(20)).isEmpty ? "未分類" : String($0.reason.prefix(20)) }).mapValues(\.count)
+            let trend = Dictionary(grouping: records, by: { String($0.time.prefix(10)) }).mapValues(\.count)
+            let report = Report(period: normalizedPeriod, label: label, total: records.count, bySource: bySource, byReason: byReason, trend: trend, records: records)
+            if selectedAccountID == accountID { self.report = report }
         } catch { present(error: error) }
     }
 
     func exportReport(path: String) async {
         guard let report else { return }
         do {
-            let data = try JSONEncoder.pretty.encode(report)
-            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            try JSONEncoder.pretty.encode(report).write(to: URL(fileURLWithPath: path), options: .atomic)
             appendLog("已匯出報告", level: "info")
         } catch { present(error: error) }
     }
 
     func fetchBlockRecords(query: String = "", source: String = "all") async {
+        guard let accountID = selectedAccountID else { blockRecords = []; return }
         do {
-            guard let accountID = selectedAccountID, !accountID.isEmpty else {
-                blockRecords = []
-                return
-            }
-            var params = ["account_id": JSONValue.string(accountID)]
-            params["query"] = .string(query)
-            params["source"] = .string(source)
-            params["limit"] = .int(500)
-            let data = try await request(method: "get_block_records", params: params)
-            let nextRecords = try decodeResult([BlockRecord].self, from: data)
-            guard selectedAccountID == accountID else { return }
-            blockRecords = nextRecords
+            blockRecords = try await store.blockRecords(accountID: accountID, query: query, source: source)
         } catch { present(error: error) }
     }
 
     func exportBlocks(path: String, query: String, source: String, format: String) async {
+        guard let accountID = selectedAccountID else {
+            errorMessage = "請先選擇 Telegram 帳號"
+            return
+        }
         do {
-            var params = accountParams() ?? [:]
-            params["path"] = .string(path)
-            params["query"] = .string(query)
-            params["source"] = .string(source)
-            params["fmt"] = .string(format)
-            _ = try await request(method: "export_blocks", params: params)
-            appendLog("已匯出封鎖記錄", level: "info")
+            let records = try await store.blockRecords(accountID: accountID, query: query, source: source)
+            if format.lowercased() == "csv" || URL(fileURLWithPath: path).pathExtension.lowercased() == "csv" {
+                let rows = records.map { [$0.time, $0.source, $0.userID, $0.name, $0.reason] }
+                try Data(csv(header: ["time", "source", "user_id", "name", "reason"], rows: rows).utf8)
+                    .write(to: URL(fileURLWithPath: path), options: .atomic)
+            } else {
+                try JSONEncoder.pretty.encode(records).write(to: URL(fileURLWithPath: path), options: .atomic)
+            }
+            appendLog("已匯出封鎖記錄（\(format.uppercased())）", level: "info")
         } catch { present(error: error) }
     }
 
     func discoverGroups() async {
-        guard canModifySelectedAccount else { return }
+        guard operationJobID == nil, let accountID = selectedAccountID else { return }
+        operationJobID = UUID().uuidString
+        defer { operationJobID = nil }
         do {
-            let data = try await request(method: "discover_groups", params: accountParams())
-            operationJobID = try decodeResult(JobStartResult.self, from: data).jobID
-        } catch { present(error: error) }
+            let api = try await api(for: accountID)
+            let page = try await api.getDialogs(limit: 100)
+            let discovered = page.chats
+                .filter { !$0.isBroadcast && $0.adminRights }
+                .map {
+                    ManagedGroup(
+                        groupID: String($0.id),
+                        title: $0.title,
+                        username: $0.username,
+                        permission: "admin",
+                        enabled: true,
+                        accessHash: $0.accessHash,
+                        isChannel: $0.isChannel,
+                        isBroadcast: $0.isBroadcast
+                    )
+                }
+            try await store.updateConfiguration(accountID: accountID) { config in
+                let existing = Dictionary(config.managedGroups.map { ($0.groupID, $0) }, uniquingKeysWith: { first, _ in first })
+                var merged = discovered.map { group in
+                    guard let old = existing[group.groupID] else { return group }
+                    return ManagedGroup(
+                        groupID: group.groupID,
+                        title: group.title,
+                        username: group.username,
+                        permission: group.permission,
+                        enabled: old.enabled,
+                        accessHash: group.accessHash ?? old.accessHash,
+                        isChannel: group.isChannel || old.isChannel,
+                        isBroadcast: group.isBroadcast || old.isBroadcast
+                    )
+                }
+                let discoveredIDs = Set(discovered.map(\.groupID))
+                merged.append(contentsOf: config.managedGroups.filter { !discoveredIDs.contains($0.groupID) })
+                config.managedGroups = merged
+            }
+            await refreshAccountData()
+        } catch {
+            present(error: error)
+        }
     }
 
     func setGroupEnabled(_ groupID: String, enabled: Bool) async {
+        guard operationJobID == nil, let accountID = selectedAccountID else { return }
+        operationJobID = UUID().uuidString
+        defer { operationJobID = nil }
         do {
-            var params = accountParams() ?? [:]
-            params["group_id"] = .string(groupID)
-            params["enabled"] = .bool(enabled)
-            _ = try await request(method: "set_group_enabled", params: params)
-            groups = groups.map { group in
-                group.id == groupID
-                    ? ManagedGroup(groupID: group.groupID, title: group.title, username: group.username, permission: group.permission, enabled: enabled)
-                    : group
+            try await store.updateConfiguration(accountID: accountID) { config in
+                config.managedGroups = config.managedGroups.map {
+                    $0.groupID == groupID
+                        ? ManagedGroup(
+                            groupID: $0.groupID,
+                            title: $0.title,
+                            username: $0.username,
+                            permission: $0.permission,
+                            enabled: enabled,
+                            accessHash: $0.accessHash,
+                            isChannel: $0.isChannel,
+                            isBroadcast: $0.isBroadcast
+                        )
+                        : $0
+                }
             }
+            groups = try await store.configuration(accountID: accountID).managedGroups
         } catch { present(error: error) }
     }
 
     func updateScanSettings(_ settings: ScanSettings) async {
+        guard let accountID = selectedAccountID else { return }
         do {
-            let updates: [String: JSONValue] = [
-                "private_dialog_limit": .int(settings.privateDialogLimit),
-                "private_message_limit": .int(settings.privateMessageLimit),
-                "private_days": .int(settings.privateDays),
-                "group_dialog_limit": .int(settings.groupDialogLimit),
-                "group_message_limit": .int(settings.groupMessageLimit),
-                "group_days": .int(settings.groupDays),
-            ]
-            var params = accountParams() ?? [:]
-            params["updates"] = .object(updates)
-            let data = try await request(method: "update_scan_settings", params: params)
-            scanSettings = try decodeResult(ScanSettings.self, from: data)
+            let normalized = settings.normalized
+            try await store.updateConfiguration(accountID: accountID) { config in
+                config.scanSettings = normalized
+            }
+            scanSettings = normalized
             appendLog("掃描設定已儲存", level: "info")
         } catch { present(error: error) }
     }
 
     func startScan(scope: String, dryRun: Bool) async {
-        guard !hasActiveScan else { return }
+        guard !hasActiveScan, let accountID = selectedAccountID else { return }
         guard selectedAccount?.running != true else {
             errorMessage = "請先停止即時防護，再掃描同一帳號的歷史訊息"
             return
         }
         scanStartInFlight = true
-        defer { scanStartInFlight = false }
-        do {
-            scanProgress.removeAll()
-            scanResult = nil
-            var params = accountParams() ?? [:]
-            params["scope"] = .string(scope)
-            params["dry_run"] = .bool(dryRun)
-            let data = try await request(method: "start_scan", params: params)
-            scanJobID = try decodeResult(JobStartResult.self, from: data).jobID
-        } catch { present(error: error) }
+        scanProgress.removeAll()
+        scanResult = nil
+        scanTask = Task { @MainActor [weak self] in
+            await self?.performScan(accountID: accountID, scope: scope, dryRun: dryRun)
+        }
     }
 
-    func cancelScan() async {
-        guard let scanJobID else { return }
+    func cancelScan() {
+        scanTask?.cancel()
+        scanJobID = nil
+        scanStartInFlight = false
+        appendLog("已取消掃描", level: "info")
+    }
+
+    private func performScan(accountID: String, scope: String, dryRun: Bool) async {
+        defer {
+            scanTask = nil
+            scanStartInFlight = false
+        }
         do {
-            _ = try await request(method: "cancel_scan", params: ["job_id": .string(scanJobID)])
-        } catch { present(error: error) }
+            let config = try await store.configuration(accountID: accountID)
+            let api = try await api(for: accountID)
+            do {
+                try await api.connect()
+            } catch {
+                removeAPIIfIdentical(api, accountID: accountID)
+                throw error
+            }
+            try Task.checkCancellation()
+            let coordinator = ProtectionCoordinator(accountID: accountID, api: api, store: store, configuration: config)
+            let jobID = UUID().uuidString
+            scanJobID = jobID
+            let result = try await coordinator.scan(scope: scope, dryRun: dryRun, settings: config.scanSettings) { [weak self] message in
+                Task { @MainActor [weak self] in
+                    self?.scanProgress.append(message)
+                    self?.appendLog(message, level: "info")
+                }
+            }
+            guard !Task.isCancelled, scanJobID == jobID else {
+                scanJobID = nil
+                return
+            }
+            let shouldPublishResult = selectedAccountID == accountID
+            if shouldPublishResult {
+                scanResult = ScanResult(scope: scope, dryRun: dryRun, dialogsSeen: result.dialogsSeen, dialogsScanned: result.dialogsScanned, groupsFound: result.groupsFound, messagesScanned: result.messagesScanned, matched: result.matched, acted: result.acted, errors: result.errors, findings: result.findings, cancelled: result.cancelled)
+            }
+            try await store.updateConfiguration(accountID: accountID) { config in
+                if dryRun { config.lastPreview = Date() }
+                else { config.lastScan = Date() }
+            }
+            scanJobID = nil
+            await refresh()
+        } catch is CancellationError {
+            scanJobID = nil
+        } catch {
+            scanJobID = nil
+            present(error: error)
+        }
     }
 
     func addFindings(_ findings: [ScanFinding], to listType: String) async {
+        guard isSupportedListType(listType) else { return }
         await runBusy("加入名單") {
             for finding in findings {
-                var params = self.accountParams() ?? [:]
-                params["list_type"] = .string(listType)
-                params["user_id"] = .string(finding.userID)
-                params["username"] = .string(finding.name)
-                params["reason"] = .string("歷史掃描：\(finding.reason)")
-                _ = try await self.request(method: "upsert_list_entry", params: params)
+                await self.upsertList(listType, userID: finding.userID, username: finding.name, reason: "歷史掃描：\(finding.reason)")
             }
             await self.refresh()
         }
     }
 
     func logout(removeCredentials: Bool) async {
-        guard canModifySelectedAccount else { return }
-        do {
-            var params = accountParams() ?? [:]
-            params["remove_credentials"] = .bool(removeCredentials)
-            let data = try await request(method: "logout", params: params)
-            operationJobID = try decodeResult(JobStartResult.self, from: data).jobID
-        } catch { present(error: error) }
+        guard let accountID = selectedAccountID else { return }
+        await runBusy("登出帳號") {
+            // Stop polling before revoking the Telegram session so no
+            // background request can race with logOut.
+            await self.stopCoordinator(for: accountID)
+            if let api = self.apis[accountID] {
+                try? await api.logOut()
+                await api.disconnect()
+            }
+            self.apis.removeValue(forKey: accountID)
+            try await self.store.clearSession(accountID: accountID, removeCredentials: removeCredentials)
+            await self.refresh()
+        }
     }
 
     func clearSession(removeCredentials: Bool) async {
-        guard canModifySelectedAccount else { return }
-        do {
-            var params = accountParams() ?? [:]
-            params["remove_credentials"] = .bool(removeCredentials)
-            _ = try await request(method: "clear_session", params: params)
-            await refresh()
-        } catch { present(error: error) }
+        guard let accountID = selectedAccountID else { return }
+        await runBusy("清除登入狀態") {
+            await self.stopProtection(for: accountID)
+            if let api = self.apis.removeValue(forKey: accountID) {
+                await api.disconnect()
+            }
+            try await self.store.clearSession(accountID: accountID, removeCredentials: removeCredentials)
+            await self.refresh()
+        }
     }
 
     func refreshOCR() async {
-        do {
-            let data = try await request(method: "get_ocr_status")
-            let ocr = try decodeResult(OCRStatus.self, from: data)
-            if let current = status {
-                status = CoreStatus(activeAccountID: current.activeAccountID, selectedAccount: current.selectedAccount, accounts: current.accounts, ocr: ocr)
-            }
-        } catch { present(error: error) }
+        guard let status else { return }
+        let ocr = OCRService.status
+        self.status = CoreStatus(activeAccountID: status.activeAccountID, selectedAccount: status.selectedAccount, accounts: status.accounts, ocr: ocr)
     }
 
     func shutdownGracefully() async {
-        guard helperIsRunning else { return }
-        do {
-            _ = try await request(method: "shutdown")
-            for _ in 0..<30 {
-                if !helperIsRunning { return }
-                try? await Task.sleep(nanoseconds: 100_000_000)
-            }
-        } catch {
-            present(error: error)
+        lifecycleGeneration &+= 1
+        refreshRequested = false
+        let activeScan = scanTask
+        activeScan?.cancel()
+        await activeScan?.value
+        scanTask = nil
+        for accountID in Array(runningAccountIDs) { await stopProtection(for: accountID) }
+        if authRequestID != nil || authContext != nil || pendingAuthenticationAPI != nil {
+            await cancelAuthentication()
         }
-        if helperIsRunning {
-            process?.terminate()
-        }
+        isBusy = false
+        for api in apis.values { await api.disconnect() }
+        apis.removeAll()
+        startingAccountIDs.removeAll()
+        automaticProtectionRetryAt.removeAll()
+        serviceStarted = false
+        connectionMessage = "已停止"
     }
 
     func shutdown() {
         Task { await shutdownGracefully() }
     }
 
-    private func startAutomaticProtectionIfNeeded() async {
-        // The account-level setting applies to every fresh app launch. The
-        // --background argument is only used to hide the window when macOS
-        // starts TeleShield at login; manual launches must run the same path.
-        guard !automaticProtectionHandled else { return }
-        automaticProtectionHandled = true
-        let autoStartAccountIDs = details?.autoStartAccountIDs ?? []
-        guard !autoStartAccountIDs.isEmpty else { return }
-        let originalAccountID = selectedAccountID
-        for accountID in autoStartAccountIDs {
-            if selectedAccountID != accountID {
-                await selectAccount(accountID)
-            }
-            await startProtection()
+    private func rebuildStatus(accounts: [StoredAccount], activeAccountID: String?, expectedGeneration: Int) async throws {
+        var summaries: [AccountSummary] = []
+        for account in accounts {
+            try Task.checkCancellation()
+            guard serviceStarted, lifecycleGeneration == expectedGeneration else { return }
+            let config = try await store.configuration(accountID: account.id)
+            let records = try await store.blockRecords(accountID: account.id, limit: 500)
+            guard serviceStarted, lifecycleGeneration == expectedGeneration else { return }
+            summaries.append(AccountSummary(
+                accountID: account.id,
+                userID: config.userID,
+                username: config.username,
+                displayName: config.displayName,
+                phoneMasked: account.phoneMasked,
+                configured: config.userID != nil,
+                blockedCount: config.blockedCount,
+                kickedCount: config.kickedCount,
+                recentBlockCount: records.count,
+                whitelistCount: config.whitelist.count,
+                blacklistCount: config.blacklist.count,
+                learnedKeywordCount: config.learnedPatterns.keywords.count,
+                lastScan: config.lastScan.map { ISO8601DateFormatter().string(from: $0) },
+                running: runningAccountIDs.contains(account.id),
+                ready: config.userID != nil && config.apiID != nil && !config.apiHash.isEmpty,
+                state: runningAccountIDs.contains(account.id) ? "running" : (config.userID != nil ? "ready" : "logged_out"),
+                error: nil
+            ))
         }
-        if let originalAccountID, selectedAccountID != originalAccountID {
-            await selectAccount(originalAccountID)
-        }
+        guard serviceStarted, lifecycleGeneration == expectedGeneration else { return }
+        let fallback = AccountSummary(accountID: nil, userID: nil, username: "", displayName: "", phoneMasked: "", configured: false, blockedCount: 0, kickedCount: 0, recentBlockCount: 0, whitelistCount: 0, blacklistCount: 0, learnedKeywordCount: 0, lastScan: nil, running: false, ready: false, state: "empty", error: nil)
+        let selected = summaries.first(where: { $0.accountID == activeAccountID }) ?? summaries.first ?? fallback
+        status = CoreStatus(activeAccountID: selected.accountID, selectedAccount: selected, accounts: summaries, ocr: OCRService.status)
+        startupEnabled = UserDefaults.standard.bool(forKey: "teleShield.startupEnabled")
     }
 
-    private func accountParams() -> [String: JSONValue]? {
-        guard let accountID = selectedAccountID, !accountID.isEmpty else { return nil }
-        return ["account_id": .string(accountID)]
+    private func startProtection(accountID: String) async throws {
+        guard !runningAccountIDs.contains(accountID), startingAccountIDs.insert(accountID).inserted else { return }
+        defer { startingAccountIDs.remove(accountID) }
+
+        let generation = lifecycleGeneration
+        guard serviceStarted else { return }
+        let config = try await store.configuration(accountID: accountID)
+        guard serviceStarted, lifecycleGeneration == generation else { return }
+        let api = try await api(for: accountID)
+        guard serviceStarted, lifecycleGeneration == generation else {
+            removeAPIIfIdentical(api, accountID: accountID)
+            return
+        }
+        do {
+            try await api.connect()
+        } catch {
+            removeAPIIfIdentical(api, accountID: accountID)
+            throw error
+        }
+        guard serviceStarted, lifecycleGeneration == generation else {
+            await api.disconnect()
+            removeAPIIfIdentical(api, accountID: accountID)
+            return
+        }
+        let coordinator = ProtectionCoordinator(accountID: accountID, api: api, store: store, configuration: config)
+        coordinators[accountID] = coordinator
+        runningAccountIDs.insert(accountID)
+        await coordinator.start { [weak self] message in
+            Task { @MainActor [weak self] in
+                self?.appendLog(message, level: "info")
+                await self?.refreshAccountData()
+            }
+        }
+        guard serviceStarted, lifecycleGeneration == generation, coordinators[accountID] === coordinator else {
+            await coordinator.stop()
+            if coordinators[accountID] === coordinator {
+                coordinators.removeValue(forKey: accountID)
+                runningAccountIDs.remove(accountID)
+            }
+            if apis[accountID] === api {
+                await api.disconnect()
+                removeAPIIfIdentical(api, accountID: accountID)
+            }
+            return
+        }
+        appendLog("已啟動 \(config.displayName.isEmpty ? accountID : config.displayName) 的原生背景防護", level: "info")
+    }
+
+    private func stopProtection(for accountID: String) async {
+        await stopCoordinator(for: accountID)
+        if let api = apis[accountID] { await api.disconnect() }
+    }
+
+    private func stopCoordinator(for accountID: String) async {
+        await coordinators.removeValue(forKey: accountID)?.stop()
+        runningAccountIDs.remove(accountID)
+    }
+
+    private func removeAPIIfIdentical(_ api: TelegramAPI, accountID: String) {
+        guard let current = apis[accountID], current === api else { return }
+        apis.removeValue(forKey: accountID)
+    }
+
+    private func api(for accountID: String) async throws -> TelegramAPI {
+        if let api = apis[accountID] { return api }
+        let config = try await store.configuration(accountID: accountID)
+        guard let apiID = config.apiID, !config.apiHash.isEmpty else {
+            throw CoreClientError(message: "請先設定 Telegram API ID、API Hash 並完成登入")
+        }
+        let session = try await store.loadSession(accountID: accountID)
+        guard session != nil else { throw CoreClientError(message: "此帳號尚未完成 Telegram 登入") }
+        let store = self.store
+        let api = TelegramAPI(
+            apiID: apiID,
+            apiHash: config.apiHash,
+            session: session,
+            sessionDidChange: { updatedSession in
+                try? await store.saveSession(updatedSession, accountID: accountID)
+            }
+        )
+        apis[accountID] = api
+        return api
+    }
+
+    private func completeAuthentication(context: AuthContext, user: NativeUser) async throws {
+        guard authContextIsCurrent(context) else { throw CancellationError() }
+        guard let session = await context.api.session() else { throw CoreClientError(message: "登入成功但缺少 auth key") }
+        let saved = NativeSession(
+            dcID: session.dcID,
+            authKey: session.authKey,
+            userID: user.id,
+            serverSalt: session.serverSalt,
+            date: Date()
+        )
+        try await store.saveSession(saved, accountID: context.accountID)
+        try await store.updateAccount(context.accountID, user: user, phone: context.phone)
+        guard authContextIsCurrent(context) else { throw CancellationError() }
+        apis[context.accountID] = context.api
+        authRequestID = nil
+        authContext = nil
+        authFlowID = nil
+        authChallengeKind = nil
+        authInProgress = false
+        authenticatedAccountID = context.accountID
+        connectionMessage = "Telegram 登入成功"
+        appendLog("Telegram 登入成功：\(user.displayName)", level: "info")
+        await refresh()
+    }
+
+    private func phoneCodeHash(from context: AuthContext) -> String {
+        context.phoneCodeHash
+    }
+
+    private func authContextIsCurrent(_ context: AuthContext) -> Bool {
+        authContext?.flowID == context.flowID && authInProgress
+    }
+
+    private func startAutomaticProtectionIfNeeded(expectedGeneration: Int? = nil) async {
+        let generation = expectedGeneration ?? lifecycleGeneration
+        guard serviceStarted, lifecycleGeneration == generation,
+              let autoIDs = details?.autoStartAccountIDs else { return }
+        let autoIDSet = Set(autoIDs)
+        automaticProtectionRetryAt = automaticProtectionRetryAt.filter { autoIDSet.contains($0.key) }
+        for accountID in autoIDs where !runningAccountIDs.contains(accountID) {
+            guard serviceStarted, lifecycleGeneration == generation else { return }
+            if let retryAt = automaticProtectionRetryAt[accountID], retryAt > Date() { continue }
+            do {
+                try await startProtection(accountID: accountID)
+                automaticProtectionRetryAt.removeValue(forKey: accountID)
+            } catch {
+                appendLog("自動啟動 \(accountID) 失敗：\(error.localizedDescription)", level: "error")
+                automaticProtectionRetryAt[accountID] = Date().addingTimeInterval(30)
+            }
+        }
     }
 
     private func runBusy(_ operation: String, _ action: @escaping () async throws -> Void) async {
@@ -580,128 +986,6 @@ final class CoreClient: ObservableObject {
         do { try await action() } catch { present(error: error) }
     }
 
-    private func request(method: String, params: [String: JSONValue]? = nil) async throws -> Data {
-        guard process?.isRunning == true, let inputHandle else {
-            throw CoreClientError(message: "Python sidecar 尚未啟動")
-        }
-        let requestID = nextRequestID
-        nextRequestID += 1
-        var data = try JSONEncoder().encode(RPCRequest(id: requestID, method: method, params: params))
-        data.append(0x0A)
-        return try await withCheckedThrowingContinuation { continuation in
-            pending[requestID] = continuation
-            do { try inputHandle.write(contentsOf: data) }
-            catch {
-                pending.removeValue(forKey: requestID)
-                continuation.resume(throwing: error)
-            }
-        }
-    }
-
-    private func decodeResult<Result: Decodable>(_ type: Result.Type, from data: Data) throws -> Result {
-        let response = try JSONDecoder().decode(RPCResponse<Result>.self, from: data)
-        guard response.ok else { throw CoreClientError(message: response.error?.message ?? "sidecar 回傳未知錯誤") }
-        guard let result = response.result else { throw CoreClientError(message: "sidecar 回傳缺少 result") }
-        return result
-    }
-
-    private func consume(_ data: Data) {
-        stdoutBuffer.append(data)
-        while let newline = stdoutBuffer.firstIndex(of: 0x0A) {
-            let line = stdoutBuffer.subdata(in: 0..<newline)
-            stdoutBuffer.removeSubrange(0...newline)
-            guard !line.isEmpty else { continue }
-            handleLine(line)
-        }
-    }
-
-    private func handleLine(_ line: Data) {
-        guard let object = try? JSONSerialization.jsonObject(with: line), let dictionary = object as? [String: Any] else {
-            appendLog(String(data: line, encoding: .utf8) ?? "sidecar 傳回無法解析的資料", level: "error")
-            return
-        }
-        if let event = dictionary["event"] as? String {
-            handleEvent(event, dictionary: dictionary)
-            return
-        }
-        guard let requestID = dictionary["id"] as? Int, let continuation = pending.removeValue(forKey: requestID) else { return }
-        continuation.resume(returning: line)
-    }
-
-    private func handleEvent(_ event: String, dictionary: [String: Any]) {
-        switch event {
-        case "log":
-            appendLog(dictionary["message"] as? String ?? "", level: dictionary["level"] as? String ?? "info")
-        case "status":
-            let state = dictionary["state"] as? String ?? "unknown"
-            connectionMessage = "listener：\(state)"
-            if state == "error" { errorMessage = dictionary["error"] as? String ?? "listener 發生錯誤" }
-            Task { [weak self] in await self?.refresh() }
-        case "auth_delivery":
-            authDeliveryMessage = dictionary["message"] as? String ?? ""
-            appendLog(authDeliveryMessage, level: "info")
-        case "auth_challenge":
-            authFlowID = dictionary["flow_id"] as? String ?? authFlowID
-            authChallengeKind = dictionary["kind"] as? String
-            authInProgress = true
-            connectionMessage = authChallengeKind == "password" ? "需要 Telegram 兩步驟驗證" : "需要 Telegram 驗證碼"
-        case "auth_succeeded":
-            authInProgress = false
-            authenticatedAccountID = dictionary["account_id"] as? String
-            authFlowID = nil
-            authChallengeKind = nil
-            connectionMessage = "Telegram 登入成功"
-            Task { [weak self] in await self?.refresh() }
-        case "auth_failed":
-            authInProgress = false
-            authenticatedAccountID = nil
-            authFlowID = nil
-            authChallengeKind = nil
-            let error = dictionary["error"] as? [String: Any]
-            errorMessage = error?["message"] as? String ?? "Telegram 登入失敗"
-            connectionMessage = "登入失敗"
-        case "scan_progress":
-            if let message = dictionary["message"] as? String {
-                scanProgress.append(message)
-                appendLog(message, level: "info")
-            }
-        case "scan_finished":
-            if let result = decodeEventResult(ScanResult.self, dictionary: dictionary["result"]) {
-                scanResult = result
-            }
-            scanJobID = nil
-            Task { [weak self] in await self?.refresh() }
-        case "scan_failed":
-            scanJobID = nil
-            errorMessage = eventError(dictionary) ?? "歷史掃描失敗"
-        case "groups_finished":
-            groups = decodeEventResult([ManagedGroup].self, dictionary: dictionary["result"]) ?? groups
-            operationJobID = nil
-        case "groups_failed":
-            operationJobID = nil
-            errorMessage = eventError(dictionary) ?? "群組讀取失敗"
-        case "account_operation_finished":
-            operationJobID = nil
-            appendLog("帳號操作完成", level: "info")
-            Task { [weak self] in await self?.refresh() }
-        case "account_operation_failed":
-            operationJobID = nil
-            errorMessage = eventError(dictionary) ?? "帳號操作失敗"
-        default:
-            appendLog(event, level: "info")
-        }
-    }
-
-    private func decodeEventResult<Result: Decodable>(_ type: Result.Type, dictionary: Any?) -> Result? {
-        guard let dictionary, JSONSerialization.isValidJSONObject(dictionary) else { return nil }
-        guard let data = try? JSONSerialization.data(withJSONObject: dictionary) else { return nil }
-        return try? JSONDecoder().decode(Result.self, from: data)
-    }
-
-    private func eventError(_ dictionary: [String: Any]) -> String? {
-        (dictionary["error"] as? [String: Any])?["message"] as? String
-    }
-
     private func appendLog(_ message: String, level: String) {
         guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         lastLog = message
@@ -709,39 +993,115 @@ final class CoreClient: ObservableObject {
         if eventLog.count > 300 { eventLog.removeFirst(eventLog.count - 300) }
     }
 
-    private func sidecarTerminated(exitCode: Int32) {
-        stdoutReadHandle?.readabilityHandler = nil
-        stderrReadHandle?.readabilityHandler = nil
-        stdoutReadHandle = nil
-        stderrReadHandle = nil
-        let message = exitCode == 0 ? "sidecar 已停止" : "sidecar 已停止（exit \(exitCode)）"
-        connectionMessage = message
-        process = nil
-        inputHandle = nil
-        let error = CoreClientError(message: message)
-        pending.values.forEach { $0.resume(throwing: error) }
-        pending.removeAll()
+    private func csv(header: [String], rows: [[String]]) -> String {
+        ([header] + rows).map { row in row.map(csvCell).joined(separator: ",") }.joined(separator: "\n") + "\n"
+    }
+
+    private func csvCell(_ value: String) -> String {
+        let escaped = value.replacingOccurrences(of: "\"", with: "\"\"")
+        return "\"\(escaped)\""
+    }
+
+    private func parseCSV(data: Data) -> [[String: String]] {
+        guard var text = String(data: data, encoding: .utf8) else { return [] }
+        if text.first == "\u{feff}" { text.removeFirst() }
+
+        var rows: [[String]] = []
+        var row: [String] = []
+        var field = ""
+        var inQuotes = false
+        let characters = Array(text)
+        var index = 0
+
+        func finishField() {
+            row.append(field)
+            field.removeAll(keepingCapacity: true)
+        }
+
+        func finishRow() {
+            finishField()
+            if row.contains(where: { !$0.isEmpty }) { rows.append(row) }
+            row.removeAll(keepingCapacity: true)
+        }
+
+        while index < characters.count {
+            let character = characters[index]
+            if inQuotes {
+                if character == "\"" {
+                    if index + 1 < characters.count, characters[index + 1] == "\"" {
+                        field.append("\"")
+                        index += 2
+                    } else {
+                        inQuotes = false
+                        index += 1
+                    }
+                } else {
+                    field.append(character)
+                    index += 1
+                }
+                continue
+            }
+
+            switch character {
+            case "\"":
+                inQuotes = true
+                index += 1
+            case ",":
+                finishField()
+                index += 1
+            case "\r":
+                finishRow()
+                index += 1
+                if index < characters.count, characters[index] == "\n" { index += 1 }
+            case "\n":
+                finishRow()
+                index += 1
+            default:
+                field.append(character)
+                index += 1
+            }
+        }
+
+        guard !inQuotes else { return [] }
+        if !field.isEmpty || !row.isEmpty { finishRow() }
+        guard let firstRow = rows.first else { return [] }
+        let header = firstRow.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard !header.isEmpty else { return [] }
+        return rows.dropFirst().map { values in
+            var dictionary: [String: String] = [:]
+            for (column, key) in header.enumerated() where !key.isEmpty {
+                dictionary[key] = column < values.count ? values[column] : ""
+            }
+            return dictionary
+        }
     }
 
     private func present(error: Error) {
         errorMessage = error.localizedDescription
-        connectionMessage = "sidecar 通訊失敗"
+        connectionMessage = "原生 Swift 服務發生錯誤"
         appendLog(error.localizedDescription, level: "error")
     }
 
-    private func resolveHelperPath() -> String? {
-        if let override = ProcessInfo.processInfo.environment["TELESHIELD_CORE_PATH"], FileManager.default.isExecutableFile(atPath: override) { return override }
-        let bundle = Bundle.main.bundleURL
-        let candidates = [
-            bundle.appendingPathComponent("Contents/Helpers/TeleShieldCore/TeleShieldCore"),
-            bundle.appendingPathComponent("Helpers/TeleShieldCore/TeleShieldCore"),
-            bundle.deletingLastPathComponent().appendingPathComponent("TeleShieldCore"),
-        ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }?.path
+    private func isSupportedListType(_ listType: String) -> Bool {
+        guard listType == "whitelist" || listType == "blacklist" else {
+            errorMessage = "不支援的名單類型：\(listType)"
+            return false
+        }
+        return true
     }
+
 }
 
-private struct StartupStatus: Codable { let enabled: Bool }
+private func normalizedTelegramUserID(_ value: String) throws -> String {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    let digits = trimmed.hasPrefix("-") ? String(trimmed.dropFirst()) : trimmed
+    guard !digits.isEmpty,
+          digits.allSatisfy({ $0 >= "0" && $0 <= "9" }),
+          Int64(trimmed) != nil else {
+        throw CoreClientError(message: "使用者 ID 必須是 numeric Telegram user ID")
+    }
+    return trimmed
+}
 
 private extension JSONEncoder {
     static var pretty: JSONEncoder {
@@ -750,4 +1110,3 @@ private extension JSONEncoder {
         return encoder
     }
 }
-

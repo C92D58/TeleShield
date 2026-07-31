@@ -12,9 +12,15 @@ let package = Package(
             targets: ["TeleShieldApp"]
         )
     ],
+    dependencies: [
+        .package(url: "https://github.com/attaswift/BigInt.git", from: "5.4.0")
+    ],
     targets: [
         .executableTarget(
             name: "TeleShieldApp",
+            dependencies: [
+                .product(name: "BigInt", package: "BigInt")
+            ],
             path: "Sources/TeleShieldApp"
         ),
         .testTarget(
