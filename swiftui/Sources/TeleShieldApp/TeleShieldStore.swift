@@ -98,9 +98,36 @@ private enum NativeDateCoding {
 
     static let decoder: JSONDecoder = {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        // The legacy Python store writes ISO-8601 timestamps with fractional
+        // seconds (for example, `2026-07-30T14:30:38.074423+00:00`), while
+        // JSONDecoder's built-in `.iso8601` strategy only accepts the
+        // non-fractional form on macOS.  Accept both formats so an app
+        // upgrade never makes the account registry look corrupted.
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let value = try container.decode(String.self)
+            if let date = parse(value) {
+                return date
+            }
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Unsupported ISO-8601 date: \(value)"
+            )
+        }
         return decoder
     }()
+
+    private static func parse(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: value) {
+            return date
+        }
+
+        let standard = ISO8601DateFormatter()
+        standard.formatOptions = [.withInternetDateTime]
+        return standard.date(from: value)
+    }
 }
 
 private struct KeychainVault {
