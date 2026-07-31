@@ -1,3 +1,4 @@
+sed: --: No such file or directory
 # TeleShield-UI
 
 TeleShield 的原生 macOS SwiftUI fork。這個分支以單一 Swift 執行體承載 UI、Telegram 協議、資料層與背景任務。
@@ -65,17 +66,17 @@ git diff --check
 scripts/build_swiftui_macos.sh
 ```
 
-CI 會在完整 Xcode 的 Intel `macos-15-intel` 與 Apple Silicon `macos-14` runner 各自執行 XCTest、Release build、架構／metadata 檢查，並上傳 unsigned DMG、可解壓測試的 `.app.zip` 與 XCTest log。手動測試流程：
+CI 會在完整 Xcode 的 Intel `macos-15-intel` 與 Apple Silicon `macos-14` runner 各自執行 XCTest、Release build、架構／metadata 檢查。兩個 job 都只上傳 unsigned `.dmg`；下載的 artifact 解壓後只會有對應架構的 DMG。手動測試流程：
 
 1. 在 GitHub 開啟 **Actions → SwiftUI desktop builds → Run workflow**，或 push 到 `codex/**` 分支觸發 workflow。
 2. 等 `macOS-arm-swiftui` 與 `macOS-intel-swiftui` 兩個 job 完成。
-3. 下載對應 artifact；若測試失敗，也請把同一 artifact 內的 `swift-test-*.log` 貼回來。
+3. 下載對應 artifact，解壓後開啟唯一的 `.dmg`；若測試失敗，請從 Actions job log 取得 XCTest 輸出。
 
 這些檢查不取代實體 macOS 手動驗收或真實 Telegram 帳號測試。
 
 登入／介面人工驗收建議：
 
-1. 解壓對應架構的 `.app.zip`，首次啟動時使用 macOS 的「打開」允許 unsigned app。
+1. 開啟對應架構的 `.dmg`，將 TeleShield 拖曳到 Applications；首次啟動時使用 macOS 的「打開」允許 unsigned app。
 2. 填入自己的 Telegram API ID／API hash，確認驗證碼登入、2FA 密碼登入與重新啟動後 session 仍可用。
 3. 先以 dry-run 掃描測試私訊，再用測試帳號送出明確的廣告規則文字，確認防護狀態、事件紀錄與封鎖記錄更新。
 4. 若測試群組具備管理權限，再以測試成員驗證移除流程；不要使用管理員或擁有者作為測試對象。

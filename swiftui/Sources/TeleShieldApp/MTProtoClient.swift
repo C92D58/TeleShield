@@ -1,3 +1,4 @@
+sed: --: No such file or directory
 import Foundation
 import BigInt
 
@@ -17,6 +18,7 @@ enum TelegramMTProtoError: LocalizedError {
     case invalidDHParameters
     case invalidNonce
     case factorizationFailed
+    case transport(code: Int32)
     case rpc(code: Int32, message: String)
     case badMessage(code: Int32)
     case retryLimitExceeded
@@ -36,6 +38,12 @@ enum TelegramMTProtoError: LocalizedError {
         case .invalidDHParameters: return "Telegram DH 參數無效"
         case .invalidNonce: return "Telegram nonce 驗證失敗"
         case .factorizationFailed: return "Telegram PQ 分解失敗"
+        case .transport(let code):
+            switch code {
+            case -404: return "Telegram MTProto 握手資料被拒絕（-404）"
+            case -444: return "Telegram MTProto 資料中心類型不符（-444）"
+            default: return "Telegram MTProto transport 錯誤（\(code)）"
+            }
         case .rpc(let code, let message): return "Telegram API \(code)：\(message)"
         case .badMessage(let code): return "Telegram MTProto 訊息無效（error code \(code)）"
         case .retryLimitExceeded: return "Telegram MTProto 訊息重送次數已達上限"
@@ -57,7 +65,7 @@ actor MTProtoClient {
         static let pqInnerDataDC: Int32 = Int32(bitPattern: 0xa9f55f95)
         static let reqDHParams: Int32 = Int32(bitPattern: 0xd712e4be)
         static let serverDHParamsOK: Int32 = Int32(bitPattern: 0xd0e8075c)
-        static let serverDHInnerData: Int32 = Int32(bitPattern: 0xb5890db)
+        static let serverDHInnerData: Int32 = Int32(bitPattern: 0xb5890dba)
         static let setClientDHParams: Int32 = Int32(bitPattern: 0xf5045f1f)
         static let clientDHInnerData: Int32 = Int32(bitPattern: 0x6643b654)
         static let dhGenOK: Int32 = Int32(bitPattern: 0x3bcbf734)
@@ -358,9 +366,6 @@ actor MTProtoClient {
         let decryptedAnswer = try MTProtoCrypto.aesIGE(encryptedAnswer, key: tmpKey, iv: tmpIV, encrypt: false)
         guard decryptedAnswer.count >= 20 else { throw TelegramMTProtoError.invalidHandshake }
         let serverPayload = decryptedAnswer.dropFirst(20)
-        guard MTProtoCrypto.sha1(Data(serverPayload)) == decryptedAnswer.prefix(20) else {
-            throw TelegramMTProtoError.invalidHandshake
-        }
         var answerReader = TLReader(Data(serverPayload))
         guard try answerReader.readInt32() == Constructor.serverDHInnerData else {
             throw TelegramMTProtoError.invalidHandshake
@@ -381,6 +386,11 @@ actor MTProtoClient {
         let dhPrime = MTProtoCrypto.bigUInt(dhPrimeData)
         let gA = MTProtoCrypto.bigUInt(gAData)
         let serverTime = try answerReader.readInt32()
+        let answerLength = answerReader.offset
+        guard answerReader.remaining < 16,
+              MTProtoCrypto.sha1(Data(serverPayload.prefix(answerLength))) == decryptedAnswer.prefix(20) else {
+            throw TelegramMTProtoError.invalidHandshake
+        }
         guard g > 1, gA > 1, gA < dhPrime - 1, dhPrime > 2 else {
             throw TelegramMTProtoError.invalidDHParameters
         }
@@ -446,6 +456,13 @@ actor MTProtoClient {
         packet.append(body)
         try await transport.send(packet.data)
         let response = try await transport.receive()
+        if response.count == 4 {
+            var errorReader = TLReader(response)
+            let code = try errorReader.readInt32()
+            if code < 0 {
+                throw TelegramMTProtoError.transport(code: code)
+            }
+        }
         var reader = TLReader(response)
         guard try reader.readInt64() == 0 else { throw TelegramMTProtoError.invalidHandshake }
         _ = try reader.readInt64()
@@ -493,7 +510,6 @@ actor MTProtoClient {
             guard reader.remaining == 0 else { throw TLCodecError.invalidLength }
             throw TelegramMTProtoError.rpc(code: code, message: message)
         case Constructor.msgContainer:
-            guard try reader.readInt32() == TLConstructor.vector else { throw TLCodecError.invalidVector }
             let count = Int(try reader.readInt32())
             guard count >= 0, count <= 1_024 else { throw TLCodecError.invalidVector }
             var shouldRetry = false

@@ -1,3 +1,4 @@
+sed: --: No such file or directory
 import Foundation
 import BigInt
 
@@ -161,7 +162,6 @@ actor TelegramAPI {
     func sendCode(phone: String) async throws -> TelegramSentCode {
         var request = TLWriter()
         request.writeInt32(Method.sendCode)
-        request.writeInt32(0) // flags: allow_flashcall/current_number
         try request.writeString(phone)
         request.writeInt32(Int32(apiID))
         try request.writeString(apiHash)

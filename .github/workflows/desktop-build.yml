@@ -1,3 +1,4 @@
+sed: --: No such file or directory
 name: SwiftUI desktop builds
 
 on:
@@ -110,17 +111,6 @@ jobs:
           file "$executable"
           du -sh dist/TeleShieldSwiftUI.app
 
-      - name: Zip app for manual testing
-        if: ${{ always() }}
-        run: |
-          if [ ! -d dist/TeleShieldSwiftUI.app ]; then
-            echo "App bundle is unavailable; preserving the XCTest log only."
-            exit 0
-          fi
-          ditto -c -k --sequesterRsrc --keepParent \
-            dist/TeleShieldSwiftUI.app \
-            "dist/${{ matrix.artifact_name }}.app.zip"
-
       - name: Create unsigned DMG
         if: ${{ always() }}
         env:
@@ -140,14 +130,11 @@ jobs:
             -format UDZO \
             "dist/${{ matrix.file_name }}"
 
-      - name: Upload app, DMG, and XCTest log
+      - name: Upload DMG artifact
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: |
-            dist/${{ matrix.file_name }}
-            dist/${{ matrix.artifact_name }}.app.zip
-            ${{ runner.temp }}/swift-test-${{ matrix.artifact_name }}.log
+          path: dist/${{ matrix.file_name }}
           if-no-files-found: warn
           retention-days: 14
