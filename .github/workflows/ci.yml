@@ -49,7 +49,7 @@ jobs:
       - name: Build
         run: python -m build
       - name: Upload artifact
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd6a33d1fada6c33d5b # v4.6.0 (SHA-pinned)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (SHA-pinned)
         with:
           name: dist
           path: dist/
@@ -67,7 +67,7 @@ jobs:
           name: dist
           path: dist/
       - name: Release
-        uses: softprops/action-gh-release@c95fe1489396fe8a9eb2471b2d6b0e4d4d8f2e6a # v2.2.1 (SHA-pinned)
+        uses: softprops/action-gh-release@e5ee6bc58a36b838b92fc1217f2e4b414b5abcc8 # v3.0.2 (SHA-pinned)
         with:
           files: dist/*
           generate_release_notes: true
