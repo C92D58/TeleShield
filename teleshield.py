@@ -31,14 +31,14 @@ SPAM_PATTERNS = [
     r"加[\s\-]*[LlvVXx]|[LlvVXx][\s\-]*信",
     r"tg[\s\-]*@?[a-zA-Z0-9_]{3,}",
     r"https?://t\.me/",
-    r"@\w{4,}",
+    r"@\w{4,}",  # 保留：與 tg 前綴模式聯動時風險可控，單獨 @ 提及暫不觸發
     r"兼職|刷單|日入|月入|躺賺|被動收入|在家工作|輕鬆賺",
     r"投資|理財|帶單|跟單|量化|穩賺|穩健|高回報|高收益",
     r"色情|A片|av|成人|裸聊|約炮|援交|包養",
-    r"賭|博|彩|casino|betting",
+    r"賭博|博彩|casino|betting|六合彩|開獎|下注|投注|賭場",
     r"註冊送|免費領|紅包|禮金|優惠碼|推廣碼",
     r"點贊|關注|刷粉|刷讚|漲粉",
-    r"售|賣|出|供應|批發|代購|代發",
+    r"出售|售賣|批發|代購|代發|供應商|出貨|庫存甩賣|清倉",
     # English patterns
     r"promote|promotion|advertisement|sponsor",
     r"click\s*(here|this\s*link|the\s*link)",
@@ -750,11 +750,13 @@ async def main():
     cmd = sys.argv[1]
 
     if cmd == "--setup":
+        # 安全：不接受 argv 傳密鑰（會進 shell history）。只支持交互式或環境變數
+        # 優先環境變數（TELESHIELD_API_ID / TELESHIELD_API_HASH），否則交互輸入
         await setup(
-            sys.argv[2] if len(sys.argv) > 2 else None,
-            sys.argv[3] if len(sys.argv) > 3 else None,
-            sys.argv[4] if len(sys.argv) > 4 else None,
-            sys.argv[5] if len(sys.argv) > 5 else None,
+            os.getenv("TELESHIELD_API_ID"),
+            os.getenv("TELESHIELD_API_HASH"),
+            os.getenv("TELESHIELD_PHONE"),
+            None,
         )
     elif cmd == "--scan":
         await scan_and_block(dry_run=False)
