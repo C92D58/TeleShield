@@ -35,6 +35,8 @@
 | 🔍 **私訊掃描** | `--scan` | 掃描近期非聯絡人對話，比對廣告模式並封鎖 |
 | 👥 **群組掃描** | `--group-scan` | 掃描群組近期訊息，踢除發廣告的成員（需管理員權限） |
 | 🛡️ **即時監聽** | `--listen` | 後台常駐，**同時監控私訊+群組**，秒級響應 |
+| 🧠 **評分引擎** | 內建 | 多維垃圾訊號評分（分級正則/連結密度/@提及/弱帳號特徵/頻率），自動區分 封鎖/標記/放行 |
+| 🔍 **群組行為分析** | 內建 | 新成員進群秒發連結、刷屏廣告 → 自動踢除 |
 | 🧪 **試運行** | `--dry-run` | 安全預覽，只顯示結果不實際封鎖/踢除 |
 | 📸 **圖片 OCR** | 內建 | 純圖片廣告 → Tesseract 本地辨識文字 → 模式比對，**資料不外傳** |
 | 🧠 **學習模式** | `--learn <文字>` | 手動標記廣告，自動提取關鍵詞+生成正則模式 |
@@ -114,6 +116,7 @@ teleshield --learn "加微信 abc123 投資穩賺日入過萬"
 # 查看封鎖摘要
 teleshield --report         # 過去 24 小時
 teleshield --report week    # 過去 7 天 + 趨勢
+teleshield --report-html    # 生成 HTML 可視化報告（~/.teleshield/report_week.html）
 
 # ─── 名單管理 ───
 
@@ -123,6 +126,10 @@ teleshield --whitelist list
 
 # 黑名單（見一個封一個）
 teleshield --blacklist add 87654321
+
+# community 名單交換（JSON 格式）
+teleshield --blacklist export my_list.json
+teleshield --blacklist import community.json
 teleshield --blacklist remove 87654321
 
 # 查看完整狀態

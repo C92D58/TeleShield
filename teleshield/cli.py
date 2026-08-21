@@ -30,9 +30,10 @@ USAGE = """TeleShield — Telegram 廣告封鎖工具
   --group-scan              掃描群組並踢除廣告
   --status                  查看狀態
   --report [day|week]       封鎖摘要報告
+  --report-html [day|week]  生成 HTML 可視化報告
   --learn <文字>            手動標記學習新模式
-  --whitelist add|remove|list [id]
-  --blacklist add|remove|list [id]
+  --whitelist add|remove|list|import|export [id|file]
+  --blacklist add|remove|list|import|export [id|file]
 
 環境變數：
   TELESHIELD_HOME           數據目錄（默認 ~/.teleshield）
@@ -88,6 +89,9 @@ async def main(argv: list[str] = None) -> int:
     elif cmd == "--report":
         period = argv[1] if len(argv) > 1 else "day"
         await report(period)
+    elif cmd == "--report-html":
+        period = argv[1] if len(argv) > 1 else "week"
+        await report(period, output_html=True)
     elif cmd == "--learn":
         text = " ".join(argv[1:]) if len(argv) > 1 else ""
         if not text:

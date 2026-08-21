@@ -12,6 +12,7 @@ from telethon.tl.functions.channels import EditBannedRequest
 from telethon.tl.functions.contacts import BlockRequest, GetContactsRequest
 from telethon.tl.types import Channel, Chat, ChatBannedRights, User
 
+from .behavior import BehaviorTracker
 from .client import get_client
 from .config import (
     HOME_DIR,
@@ -25,7 +26,8 @@ from .config import (
     save_learned_patterns,
 )
 from .ocr import check_photo
-from .patterns import SPAM_PATTERNS, is_spam, learn_from_text
+from .patterns import SPAM_PATTERNS, learn_from_text
+from .scoring import SpamScorer, Verdict
 
 __all__ = [
     "setup",
@@ -93,19 +95,23 @@ async def setup(api_id: str = None, api_hash: str = None, phone: str = None, cod
 
 # ──────────── 掃描私訊封鎖 ────────────
 
-async def _scan_text(client, msg, cfg, now, days=14):
-    """檢查單條消息是否廣告，返回 (spam_text, is_ocr)。"""
+async def _scan_text(client, msg, cfg, now, days=14, scorer=None):
+    """檢查單條消息是否廣告。返回 (spam_text, is_ocr, result) 或 None。"""
+    scorer = scorer or SpamScorer(cfg)
     if not msg:
         return None
     if msg.date and msg.date < now - timedelta(days=days):
         return None
     msg_text = msg.text or ""
-    if is_spam(msg_text, cfg):
-        return msg_text[:120], False
+    res = scorer.score(msg_text)
+    if res.verdict != Verdict.PASS:
+        return msg_text[:120], False, res
     if msg.photo:
         ocr_text = await check_photo(client, msg)
-        if ocr_text and is_spam(ocr_text, cfg):
-            return f"[OCR] {ocr_text[:100]}", True
+        if ocr_text:
+            res2 = scorer.score(ocr_text)
+            if res2.verdict != Verdict.PASS:
+                return f"[OCR] {ocr_text[:100]}", True, res2
     return None
 
 
@@ -131,6 +137,8 @@ async def scan_and_block(dry_run: bool = False):
 
         blocked = 0
         skipped = 0
+        flagged = 0
+        scorer = SpamScorer(cfg)
 
         for dialog in dialogs:
             entity = dialog.entity
@@ -144,17 +152,25 @@ async def scan_and_block(dry_run: bool = False):
 
             found = None
             for msg in msgs:
-                found = await _scan_text(client, msg, cfg, now)
+                found = await _scan_text(client, msg, cfg, now, scorer=scorer)
                 if found:
                     break
             if not found:
                 continue
 
             spam_text = found[0]
+            result = found[2]
             name = f"{entity.first_name or ''} {entity.last_name or ''}".strip()
             uname = f"@{entity.username}" if entity.username else ""
             print(f"\n  ⚠️  廣告: {name} {uname}")
             print(f"      {spam_text[:120]}")
+
+            # FLAG：只記錄標記，不封鎖（用戶觀察）
+            if result.verdict == Verdict.FLAG:
+                flagged += 1
+                log_block(entity.id, name, spam_text, "flag")
+                print(f"      🏷️  可疑（分數 {result.score}）— 已標記，未封鎖")
+                continue
 
             if dry_run:
                 skipped += 1
@@ -164,14 +180,15 @@ async def scan_and_block(dry_run: bool = False):
                 await client(BlockRequest(id=entity.id))
                 blocked += 1
                 log_block(entity.id, name, spam_text, "scan")
-                print("      ✅ 封鎖")
+                print(f"      ✅ 封鎖（分數 {result.score}）")
             except Exception as e:
                 print(f"      ❌ 失敗: {e}")
 
         print(f"\n{'─'*40}")
-        print(f"結果: 已處理 {blocked+skipped}")
+        print(f"結果: 已處理 {blocked+skipped+flagged}（封鎖 {blocked} / 標記 {flagged} / 試運行 {skipped}）")
         if not dry_run and blocked > 0:
             cfg["blocked_count"] = cfg.get("blocked_count", 0) + blocked
+        cfg["flagged_count"] = cfg.get("flagged_count", 0) + flagged
         cfg["last_scan"] = now.isoformat()
         save_config(cfg)
         await client.disconnect()
@@ -222,6 +239,8 @@ async def scan_groups(dry_run: bool = False):
         print(f"👥 管理中的群組: {len(groups)}")
         kicked = 0
         total_scanned = 0
+        flagged = 0
+        scorer = SpamScorer(cfg)
 
         for dialog in groups:
             entity = dialog.entity
@@ -243,10 +262,11 @@ async def scan_groups(dry_run: bool = False):
                 if msg.date and msg.date < now - timedelta(days=3):
                     continue
 
-                found = await _scan_text(client, msg, cfg, now, days=3)
+                found = await _scan_text(client, msg, cfg, now, days=3, scorer=scorer)
                 if not found:
                     continue
                 spam_reason = found[0]
+                result = found[2]
 
                 total_scanned += 1
                 try:
@@ -257,6 +277,13 @@ async def scan_groups(dry_run: bool = False):
 
                 print(f"\n  ⚠️  [{title}] {sname}")
                 print(f"     {spam_reason[:100]}")
+
+                # FLAG：只記錄標記
+                if result.verdict == Verdict.FLAG:
+                    flagged += 1
+                    log_block(msg.sender_id, sname, spam_reason, "flag")
+                    print(f"     🏷️  可疑（分數 {result.score}）— 已標記，未踢除")
+                    continue
 
                 if dry_run:
                     continue
@@ -274,9 +301,10 @@ async def scan_groups(dry_run: bool = False):
                     print(f"     ❌ 踢除失敗: {e}")
 
         print(f"\n{'─'*40}")
-        print(f"結果: 掃描 {total_scanned} 條, {'已踢除' if not dry_run else '試運行'}: {kicked if not dry_run else total_scanned}")
+        print(f"結果: 掃描 {total_scanned} 條, {'已踢除' if not dry_run else '試運行'}: {kicked if not dry_run else total_scanned}（標記 {flagged}）")
         if not dry_run and kicked > 0:
             cfg["kicked_count"] = cfg.get("kicked_count", 0) + kicked
+        cfg["flagged_count"] = cfg.get("flagged_count", 0) + flagged
         save_config(cfg)
         await client.disconnect()
     except Exception as e:
@@ -295,10 +323,23 @@ async def listen():
     print("👂 TeleShield 即時監聽啟動中...")
     print("    ✅ 私訊廣告 → 自動封鎖")
     print("    👥 群組廣告 → 自動踢除（管理員身份）")
+    print("    🔍 群組行為分析 → 進群秒發連結/刷屏廣告自動踢除")
     print("    📸 OCR 支援 → 純圖片廣告也辨識")
     print("    按 Ctrl+C 停止\n")
 
     client = get_client(cfg)
+    scorer = SpamScorer(cfg)
+    tracker = BehaviorTracker()
+
+    # 入群事件：記錄新成員加入時間（行為分析用）
+    @client.on(events.ChatAction)
+    async def on_join(event):
+        if not event.user_added and event.user_id != event.chat_id:
+            return
+        added = event.user_ids or (event.user_id and [event.user_id]) or []
+        for uid in added:
+            if uid and uid != (await client.get_me()).id:
+                tracker.record_join(event.chat_id, uid)
 
     @client.on(events.NewMessage(incoming=True))
     async def handler(event):
@@ -312,6 +353,10 @@ async def listen():
 
         if hasattr(sender, 'is_self') and sender.is_self:
             return
+
+        # 群組消息：先記錄行為（供爆發/新成員分析）
+        if isinstance(chat, (Chat, Channel)):
+            tracker.record_message(chat.id, sender_id, msg.text or "")
 
         if is_blacklisted(sender_id, cfg):
             try:
@@ -343,15 +388,23 @@ async def listen():
                 pass
 
             spam_text = msg.text or ""
-            is_spam_by_text = is_spam(spam_text, cfg)
+            # 帳號特徵（weak profile 信號）
+            user_info = {
+                "username": getattr(sender, "username", None),
+                "photo": None,
+                "bio": None,
+            }
+            result = scorer.score(spam_text, user_info=user_info)
             ocr_found_spam = False
-            if not is_spam_by_text and msg.photo:
+            if result.verdict == Verdict.PASS and msg.photo:
                 ocr_text = await check_photo(client, msg)
-                if ocr_text and is_spam(ocr_text, cfg):
-                    ocr_found_spam = True
-                    spam_text = ocr_text[:100]
+                if ocr_text:
+                    result = scorer.score(ocr_text)
+                    if result.verdict != Verdict.PASS:
+                        ocr_found_spam = True
+                        spam_text = ocr_text[:100]
 
-            if not is_spam_by_text and not ocr_found_spam:
+            if result.verdict == Verdict.PASS:
                 return
 
             name = f"{sender.first_name or ''} {sender.last_name or ''}".strip()
@@ -361,12 +414,20 @@ async def listen():
             print(f"\n[{ts}] {icon}⚠️  私訊廣告: {name} {uname}")
             print(f"    {spam_text[:100]}")
 
+            # FLAG：只標記不封鎖
+            if result.verdict == Verdict.FLAG:
+                log_block(sender_id, name, spam_text, "flag")
+                cfg["flagged_count"] = cfg.get("flagged_count", 0) + 1
+                save_config(cfg)
+                print(f"     🏷️  可疑（分數 {result.score}）— 已標記，未封鎖")
+                return
+
             try:
                 await client(BlockRequest(id=sender_id))
                 cfg["blocked_count"] = cfg.get("blocked_count", 0) + 1
                 save_config(cfg)
                 log_block(sender_id, name, spam_text, "private")
-                print(f"     ✅ 封鎖（累計 {cfg['blocked_count']}）")
+                print(f"     ✅ 封鎖（分數 {result.score}）（累計 {cfg['blocked_count']}）")
             except Exception as e:
                 print(f"     ❌ 封鎖失敗: {e}")
             return
@@ -387,23 +448,52 @@ async def listen():
             except Exception:
                 pass
 
+            sname = f"{sender.first_name or ''} {sender.last_name or ''}".strip() if hasattr(sender, 'first_name') else str(sender_id)
+            title = getattr(chat, "title", "群組")
+
+            # 行為分析：進群秒發連結 / 刷屏廣告 → 直接踢除
+            suspicious, behavior_reason = tracker.suspicious(chat.id, sender_id)
+            if suspicious:
+                ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+                print(f"\n[{ts}] 🔍 行為可疑 [{title}]: {sname}")
+                print(f"    {behavior_reason}")
+                try:
+                    rights = ChatBannedRights(until_date=None, view_messages=True)
+                    await client(EditBannedRequest(chat, sender_id, rights))
+                    cfg["kicked_count"] = cfg.get("kicked_count", 0) + 1
+                    save_config(cfg)
+                    log_block(sender_id, sname, f"[behavior] {behavior_reason}", "group")
+                    print(f"     ✅ 已踢除（行為分析）（累計 {cfg['kicked_count']}）")
+                except Exception as e:
+                    print(f"     ❌ 踢除失敗: {e}")
+                return
+
             msg_text = msg.text or ""
+            result = scorer.score(msg_text)
             spam_reason = ""
-            if is_spam(msg_text, cfg):
+            if result.verdict != Verdict.PASS:
                 spam_reason = msg_text[:100]
             elif msg.photo:
                 ocr_text = await check_photo(client, msg)
-                if ocr_text and is_spam(ocr_text, cfg):
-                    spam_reason = f"[OCR] {ocr_text[:80]}"
+                if ocr_text:
+                    result = scorer.score(ocr_text)
+                    if result.verdict != Verdict.PASS:
+                        spam_reason = f"[OCR] {ocr_text[:80]}"
 
             if not spam_reason:
                 return
 
-            sname = f"{sender.first_name or ''} {sender.last_name or ''}".strip() if hasattr(sender, 'first_name') else str(sender_id)
-            title = getattr(chat, "title", "群組")
             ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
             print(f"\n[{ts}] 👥 群組廣告 [{title}]: {sname}")
             print(f"    {spam_reason[:100]}")
+
+            # FLAG：只標記不踢除
+            if result.verdict == Verdict.FLAG:
+                log_block(sender_id, sname, spam_reason, "flag")
+                cfg["flagged_count"] = cfg.get("flagged_count", 0) + 1
+                save_config(cfg)
+                print(f"     🏷️  可疑（分數 {result.score}）— 已標記，未踢除")
+                return
 
             try:
                 rights = ChatBannedRights(until_date=None, view_messages=True)
@@ -411,7 +501,7 @@ async def listen():
                 cfg["kicked_count"] = cfg.get("kicked_count", 0) + 1
                 save_config(cfg)
                 log_block(sender_id, sname, spam_reason, "group")
-                print(f"     ✅ 已踢除（累計 {cfg['kicked_count']}）")
+                print(f"     ✅ 已踢除（分數 {result.score}）（累計 {cfg['kicked_count']}）")
             except Exception as e:
                 print(f"     ❌ 踢除失敗: {e}")
 
@@ -431,8 +521,15 @@ async def listen():
 
 async def manage_list(action: str, list_type: str, user_id_str: str = None):
     cfg = load_config()
-    key = f"{list_type}_list"
+    # 修復：config 中名單鍵為 "blacklist"/"whitelist"（舊版誤存 "xxx_list" 已不可讀）
+    key = list_type if list_type in ("blacklist", "whitelist") else f"{list_type}_list"
     lst = cfg.get(key, {})
+
+    # 遷移：舊版誤存的 xxx_list 併入
+    legacy = cfg.get(f"{list_type}_list")
+    if legacy and not lst:
+        lst = legacy
+        cfg.pop(f"{list_type}_list", None)
 
     if action == "list":
         if not lst:
@@ -442,6 +539,49 @@ async def manage_list(action: str, list_type: str, user_id_str: str = None):
             for uid, info in sorted(lst.items()):
                 tag = f"@{info.get('username','')}" if info.get('username') else ""
                 print(f"  • {uid} {tag} ({info.get('added','?')})")
+        return
+
+    # import / export：community 名單交換（JSON id 列表）
+    if action == "export":
+        import json as _json
+
+        if not user_id_str:
+            print("❌ 用法: --blacklist export <file.json>")
+            return
+        try:
+            with open(user_id_str, "w", encoding="utf-8") as f:
+                _json.dump({"users": list(lst.keys()), "type": list_type, "version": 1}, f, ensure_ascii=False, indent=2)
+            print(f"✅ 已導出 {len(lst)} 人到 {user_id_str}")
+        except OSError as e:
+            print(f"❌ 導出失敗: {e}")
+        return
+
+    if action == "import":
+        import json as _json
+
+        if not user_id_str:
+            print("❌ 用法: --blacklist import <file.json>")
+            return
+        try:
+            with open(user_id_str, encoding="utf-8") as f:
+                data = _json.load(f)
+            ids = data.get("users", []) if isinstance(data, dict) else data
+            if not isinstance(ids, list):
+                print("❌ 檔案格式不正確（需 {\"users\": [\"123\", ...]}）")
+                return
+        except (OSError, ValueError) as e:
+            print(f"❌ 讀取失敗: {e}")
+            return
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        added = 0
+        for uid in ids:
+            uid = str(uid)
+            if uid not in lst:
+                lst[uid] = {"added": now, "username": "", "reason": "community"}
+                added += 1
+        cfg[key] = lst
+        save_config(cfg)
+        print(f"✅ 已導入 {added} 人（跳過 {len(ids)-added} 已存在），{list_type} 共 {len(lst)} 人")
         return
 
     if not user_id_str:
@@ -470,7 +610,7 @@ async def manage_list(action: str, list_type: str, user_id_str: str = None):
 
 # ──────────── 封鎖摘要報告 ────────────
 
-async def report(period: str = "day"):
+async def report(period: str = "day", output_html: bool = False):
     log = load_block_log()
     blocks = log.get("blocks", [])
     if not blocks:
@@ -509,6 +649,10 @@ async def report(period: str = "day"):
         else:
             reasons[reason[:20]] += 1
 
+    if output_html:
+        _render_html_report(recent, total, sources, reasons, period, label)
+        return
+
     print(f"\n📊 封鎖摘要 — {label}")
     print(f"{'─'*40}")
     print(f"   總計封鎖: {total} 人")
@@ -532,6 +676,95 @@ async def report(period: str = "day"):
         print("\n   每日趨勢:")
         for d in sorted(days.keys()):
             print(f"     {d}: {days[d]} 人")
+
+
+def _render_html_report(recent, total, sources, reasons, period, label):
+    """生成自包含 HTML 報告（無外部依賴，可直接開/部署）。"""
+    import html as _html
+
+    source_map = {"private": "私訊", "group": "群組", "scan": "掃描", "flag": "標記"}
+    days = defaultdict(int)
+    for b in recent:
+        days[b["time"][:10]] += 1
+
+    def _bars(data):
+        if not data:
+            return "<p class='muted'>無數據</p>"
+        mx = max(data.values()) or 1
+        out = []
+        for k, v in sorted(data.items(), key=lambda x: -x[1])[:10]:
+            pct = int(v / mx * 100)
+            out.append(
+                f"<div class='row'><span class='k'>{_html.escape(str(k)[:24])}</span>"
+                f"<div class='bar'><div class='fill' style='width:{pct}%'></div></div>"
+                f"<span class='v'>{v}</span></div>"
+            )
+        return "\n".join(out)
+
+    day_rows = "\n".join(
+        f"<div class='row'><span class='k'>{d}</span>"
+        f"<div class='bar'><div class='fill' style='width:{int(c/max(days.values())*100)}%'></div></div>"
+        f"<span class='v'>{c}</span></div>"
+        for d, c in sorted(days.items())
+    ) if days else ""
+
+    rows = ""
+    for b in recent[-30:]:
+        src = source_map.get(b.get("source", ""), b.get("source", ""))
+        rows += (
+            f"<tr><td class='muted'>{_html.escape(str(b.get('time',''))[5:16])}</td>"
+            f"<td>{src}</td><td class='muted'>{_html.escape(str(b.get('user_id','')))}</td>"
+            f"<td>{_html.escape(str(b.get('name',''))[:16])}</td>"
+            f"<td class='reason'>{_html.escape(str(b.get('reason',''))[:60])}</td></tr>"
+        )
+
+    html_doc = f"""<!DOCTYPE html>
+<html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TeleShield 報告 — {_html.escape(label)}</title>
+<style>
+  :root {{ --bg:#0f1115; --card:#171a21; --fg:#e8e6e3; --muted:#8a8a93; --acc:#ff9e5e; }}
+  * {{ box-sizing:border-box; margin:0; padding:0; }}
+  body {{ background:var(--bg); color:var(--fg); font:14px/1.6 -apple-system, "PingFang TC", "Noto Sans TC", sans-serif; padding:32px 16px; }}
+  .wrap {{ max-width:720px; margin:0 auto; }}
+  h1 {{ font-size:22px; margin-bottom:4px; }}
+  .sub {{ color:var(--muted); margin-bottom:24px; }}
+  .cards {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; margin-bottom:24px; }}
+  .card {{ background:var(--card); border-radius:12px; padding:16px; }}
+  .card .n {{ font-size:26px; font-weight:700; color:var(--acc); }}
+  .card .t {{ color:var(--muted); font-size:12px; }}
+  .panel {{ background:var(--card); border-radius:12px; padding:16px 20px; margin-bottom:16px; }}
+  .panel h2 {{ font-size:14px; color:var(--acc); margin-bottom:12px; }}
+  .row {{ display:flex; align-items:center; gap:10px; margin-bottom:6px; }}
+  .k {{ width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--fg); }}
+  .bar {{ flex:1; background:#23272f; border-radius:4px; height:10px; overflow:hidden; }}
+  .fill {{ height:100%; background:linear-gradient(90deg,#ff9e5e,#ff6b3d); border-radius:4px; }}
+  .v {{ width:36px; text-align:right; color:var(--muted); }}
+  table {{ width:100%; border-collapse:collapse; }}
+  th {{ text-align:left; color:var(--muted); font-weight:500; font-size:12px; padding:6px 8px; border-bottom:1px solid #23272f; }}
+  td {{ padding:6px 8px; border-bottom:1px solid #1c2027; }}
+  .muted {{ color:var(--muted); }}
+  .reason {{ max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+  @media (max-width:600px) {{ .k {{ width:90px; }} .reason {{ max-width:120px; }} }}
+</style></head><body><div class="wrap">
+<h1>🛡️ TeleShield 報告</h1>
+<div class="sub">{_html.escape(label)} · 生成於 {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}</div>
+<div class="cards">
+  <div class="card"><div class="n">{total}</div><div class="t">處理總數</div></div>
+  <div class="card"><div class="n">{sources.get('private',0)}</div><div class="t">私訊封鎖</div></div>
+  <div class="card"><div class="n">{sources.get('group',0)}</div><div class="t">群組踢除</div></div>
+  <div class="card"><div class="n">{sources.get('flag',0)}</div><div class="t">標記（未動作）</div></div>
+</div>
+<div class="panel"><h2>廣告類型 Top 10</h2>{_bars(reasons)}</div>
+<div class="panel"><h2>每日趨勢</h2>{day_rows}</div>
+<div class="panel"><h2>最近 30 筆</h2>
+<table><thead><tr><th>時間</th><th>來源</th><th>ID</th><th>用戶</th><th>原因</th></tr></thead>
+<tbody>{rows}</tbody></table></div>
+</div></body></html>"""
+
+    out = HOME_DIR / f"report_{period}.html"
+    out.write_text(html_doc, encoding="utf-8")
+    print(f"📄 報告已生成: {out}")
 
 
 # ──────────── 學習模式 ────────────

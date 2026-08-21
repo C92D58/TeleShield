@@ -1,6 +1,11 @@
 """廣告模式與判斷邏輯。
 
-SPAM_PATTERNS 內建正則（收窄版：避免單字誤封）+ 學習模式（關鍵詞 + 自訂正則）。
+分級模式（v0.10.0）：
+- SEVERE：直接封鎖級（賭博/色情/刷單/裸聊）
+- MODERATE：明顯廣告（投資/兼職/出售/加微信）
+- LOW：弱信號（t.me 連結/@ 提及/優惠碼），單獨命中不足以封鎖
+
+SPAM_PATTERNS 為三級合併的平列表（向後相容 is_spam()）。
 純函數、零 I/O——可獨立單元測試。
 """
 
@@ -8,43 +13,119 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["SPAM_PATTERNS", "is_spam", "learn_from_text", "extract_keywords"]
-
-# 內建廣告模式（2026-08-21 收窄：去除「出/博/彩/售/賣」單字，改用組合詞）
-SPAM_PATTERNS = [
-    # 中文廣告常見模式
-    r"加.{0,4}?微信|加[\s\-]*[LlvVxX]|vx[:：\s]|[LlvVxX][\s\-]*信",
-    r"tg[\s\-]*@?[a-zA-Z0-9_]{3,}",
-    r"(?:https?://)?t\.me/",
-    r"@\w{4,}",  # 保留：與 tg 前綴模式聯動時風險可控，單獨 @ 提及暫不觸發
-    r"兼職|刷單|日入|月入|躺賺|被動收入|在家工作|輕鬆賺",
-    r"投資|理財|帶單|跟單|量化|穩賺|穩健|高回報|高收益",
-    r"色情|A片|av|成人|裸聊|約炮|援交|包養",
-    r"賭博|博彩|casino|betting|六合彩|開獎|下注|投注|賭場",
-    r"註冊送|免費領|紅包|禮金|優惠碼|推廣碼",
-    r"點贊|關注|刷粉|刷讚|漲粉",
-    r"出售|售賣|批發|代購|代發|供應商|出貨|庫存甩賣|清倉",
-    # English patterns
-    r"promote|promotion|advertisement|sponsor",
-    r"click\s*(here|this\s*link|the\s*link)",
-    r"earn\s*money|work\s*from\s*home|passive\s*income",
-    r"free\s*crypto|free\s*bitcoin|airdrop|giveaway",
-    r"limited\s*offer|discount\s*\d{2,}%|buy\s*now",
+__all__ = [
+    "SEVERE_PATTERNS",
+    "MODERATE_PATTERNS",
+    "LOW_PATTERNS",
+    "SPAM_PATTERNS",
+    "is_spam",
+    "match_patterns",
+    "learn_from_text",
+    "extract_keywords",
 ]
 
-STOP_WORDS = {
-    "我們", "他們", "可以", "沒有", "這個", "那個", "什麼", "因為", "所以", "但是",
-    "如果", "雖然", "然後", "而且", "或者", "不過", "還是", "就是", "不是", "一個",
-}
+# ─── 高危：直接封鎖級（繁簡並收，語義簇獨立計分）───
+SEVERE_PATTERNS = [
+    # 加微信/加V/V信：陌生非聯絡人說此 = 引流廣告（聯絡人/白名單已在掃描層排除）
+    r"加.{0,4}?微信|加[\s\-]*[LlvVxX]|vx[:：\s]|[LlvVxX][\s\-]*信",
+    # 色情類
+    r"色情|A片|成人|裸聊",
+    r"約炮|约炮|援交|包養|包养",
+    # 賭博類
+    r"賭博|赌博|博彩|賭場|赌场|賭球",
+    r"六合彩|開獎|开奖|下注|投注|casino|betting",
+    # 兼職/刷單類
+    r"兼職|兼职|刷單|刷单",
+    r"日入|月入|日赚|躺賺|躺赚|被動收入|在家工作|在家赚钱|輕鬆賺|轻松赚",
+    # 金融詐騙類
+    r"裸貸|裸贷|借貸|套現|套现|跑分|洗錢",
+]
+
+# ─── 中危：明顯廣告（繁簡並收，需組合或疊加）───
+MODERATE_PATTERNS = [
+    # 投資理財類
+    r"投資|投资|理財|理财",
+    r"帶單|带单|跟單|跟单|量化",
+    r"穩賺|稳赚|穩健|高回報|高收益|高回报",
+    # 交易出售類
+    r"出售|售卖|批發|批发|代購|代购",
+    r"代發|代发|供應商|出貨|庫存甩賣|清倉|清仓",
+    # 優惠引流類
+    r"註冊送|注册送",
+    r"免費領|免费领",
+    r"紅包|禮金|優惠碼|优惠码|推廣碼|推广码",
+    # 刷量類
+    r"點贊|点赞|刷粉|刷讚|刷赞|漲粉|涨粉",
+    r"關注|关注",
+    # 英文推廣
+    r"promote|promotion|advertisement|sponsor",
+    r"earn\s*money|passive\s*income",
+    r"work\s*from\s*home",
+    r"free\s*crypto|free\s*bitcoin",
+    r"airdrop|giveaway",
+    r"limited\s*offer|buy\s*now",
+    r"discount\s*\d{2,}%|\d{2,}%\s*off",
+]
+
+# ─── 低危：弱信號，需組合 ───
+LOW_PATTERNS = [
+    r"tg[\s\-]*@?[a-zA-Z0-9_]{3,}",
+    r"(?:https?://)?t\.me/",
+    r"@\w{4,}",  # 單獨 @ 提及暫不封鎖
+    r"click\s*(here|this\s*link|the\s*link)",
+]
+
+# 合併平列表（向後相容）
+SPAM_PATTERNS = SEVERE_PATTERNS + MODERATE_PATTERNS + LOW_PATTERNS
+
+
+def match_patterns(text: str) -> tuple[str, list[str]]:
+    """返回 (最高嚴重級, 命中的模式列表)。未命中返回 (None, [])。"""
+    if not text:
+        return None, []
+    hits = []
+    max_tier = None
+    for tier, patterns in (
+        ("severe", SEVERE_PATTERNS),
+        ("moderate", MODERATE_PATTERNS),
+        ("low", LOW_PATTERNS),
+    ):
+        for p in patterns:
+            if re.search(p, text, re.IGNORECASE):
+                hits.append(p)
+                if max_tier is None or _tier_weight(tier) > _tier_weight(max_tier):
+                    max_tier = tier
+    return max_tier, hits
+
+
+def _tier_weight(tier) -> int:
+    return {"severe": 3, "moderate": 2, "low": 1}.get(tier, 0)
+
+
+def _hits_score(hits: list[str]) -> int:
+    """按命中模式疊加計分（同級多次命中加分，上限 9）。"""
+    score = 0
+    for h in hits[:10]:
+        if h in SEVERE_PATTERNS:
+            score += 3
+        elif h in MODERATE_PATTERNS:
+            score += 2
+        else:
+            score += 1
+    return min(score, 9)
 
 
 def is_spam(text: str, cfg: dict = None) -> bool:
-    """檢查文字是否包含廣告模式（含自訂學習模式）。"""
+    """檢查文字是否為明顯廣告。
+
+    語義（v0.10.0）：疊加計分 ≥3 或命中學習模式才判定。
+    單一弱信號（t.me 連結/@ 提及/單個投資詞）不再誤判。
+    """
     if not text:
         return False
-    for pattern in SPAM_PATTERNS:
-        if re.search(pattern, text, re.IGNORECASE):
-            return True
+    _, hits = match_patterns(text)
+    if _hits_score(hits) >= 3:
+        return True
     if cfg:
         lp = cfg.get("learned_patterns", {})
         for p in lp.get("patterns", []):
@@ -57,6 +138,12 @@ def is_spam(text: str, cfg: dict = None) -> bool:
             if kw.lower() in text.lower():
                 return True
     return False
+
+
+STOP_WORDS = {
+    "我們", "他們", "可以", "沒有", "這個", "那個", "什麼", "因為", "所以", "但是",
+    "如果", "雖然", "然後", "而且", "或者", "不過", "還是", "就是", "不是", "一個",
+}
 
 
 def extract_keywords(text: str) -> list[str]:

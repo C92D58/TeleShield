@@ -13,18 +13,13 @@ class TestSpamDetection:
         [
             "加我微信 xiaoming888",
             "加V xiaoming888",
-            "tg @telegroup2024",
-            "快來 t.me/joinchat/xxx",
-            "@promo_bot_2024",
-            "兼職刷單 日入500",
-            "投資理財穩賺 高回報",
-            "裸聊約炮 包養",
-            "賭博 六合彩 投注",
-            "註冊送紅包 免費領",
-            "刷粉漲粉 點贊關注",
-            "出售批發 代購代發",
-            "promote your channel",
-            "click here",
+            "兼职刷单 日入500",
+            "投资理财稳赚 高回报",
+            "裸聊约炮 包养",
+            "赌博 六合彩 投注",
+            "注册送红包 免费领",
+            "刷粉涨粉 点赞关注",
+            "出售批发 代购代发",
             "earn money work from home",
             "free bitcoin airdrop",
             "limited offer 50% off",
@@ -32,6 +27,19 @@ class TestSpamDetection:
     )
     def test_spam_hits(self, text):
         assert is_spam(text) is True, f"應命中廣告模式: {text!r}"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "快來 t.me/joinchat/xxx",   # 單一 t.me 連結（弱信號）
+            "@promo_bot_2024",           # 單一 @ 提及（弱信號）
+            "click here",                # 單一英文弱信號
+            "promote your channel",      # 單一 moderate 詞
+            "tg @telegroup2024",         # tg+@ 弱組合（2 分）
+        ],
+    )
+    def test_weak_signal_not_spam(self, text):
+        assert is_spam(text) is False, f"弱信號不應單獨判定: {text!r}"
 
 
 class TestFalsePositiveRegression:
