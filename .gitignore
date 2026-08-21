@@ -1,12 +1,22 @@
 # Python
 __pycache__/
 *.py[cod]
-*.session
-.env
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
 
-# Session
+# 憑證與數據（絕不提交）
+.env
+.env.*
+!.env.example
+*.session
 .tg-sessions/
+.teleshield/
 config.json
+block_log.json
+learned_patterns.json
 
 # OS
 .DS_Store

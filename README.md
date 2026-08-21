@@ -55,23 +55,26 @@
 
 ### 安裝 / Install
 
+**方式一：一鍵安裝（推薦）**
+
 ```bash
-# 克隆倉庫
 git clone https://github.com/c92d58/TeleShield.git
 cd TeleShield
+bash install.sh          # 檢查依賴 + pip 安裝 + 建立數據目錄
+```
 
-# 安裝核心依賴
-pip install telethon
+**方式二：pip 直接安裝**
 
-# 圖片 OCR 支援（選用，強烈建議安裝）
+```bash
+pip install "teleshield[ocr]"
+# 圖片 OCR 系統依賴（選用，強烈建議）
 apt install tesseract-ocr tesseract-ocr-chi-sim
-pip install pytesseract Pillow
 ```
 
 ### 首次設定 / First-time Setup
 
 ```bash
-python teleshield.py --setup
+teleshield --setup
 ```
 
 依序輸入：
@@ -80,7 +83,9 @@ python teleshield.py --setup
 3. `手機號碼` — 含國碼，如 `+852****5931`
 4. `驗證碼` — Telegram 會發送驗證碼到你手機
 
-登入成功後自動儲存 Session，下次不需重複登入。
+> **安全提示**：憑證也可寫入 `~/.teleshield/.env`（`TELESHIELD_API_ID` / `TELESHIELD_API_HASH` / `TELESHIELD_PHONE`），`--setup` 會自動讀取。**切勿**用命令行參數傳憑證（會洩漏到 shell history）。
+
+登入成功後自動儲存 Session（`~/.teleshield/`），下次不需重複登入。
 
 ### 基本用法 / Usage
 
@@ -88,40 +93,40 @@ python teleshield.py --setup
 # ─── 私訊防護 ───
 
 # 先試運行看看結果
-python teleshield.py --dry-run
+teleshield --dry-run
 
 # 實際掃描近期待處理的廣告
-python teleshield.py --scan
+teleshield --scan
 
 # 啟動即時監聽（後台常駐，私訊+群組全保護）
-python teleshield.py --listen
+teleshield --listen
 
 # ─── 群組管理 ───
 
 # 掃描所有管理中的群組，踢除廣告發送者
-python teleshield.py --group-scan
+teleshield --group-scan
 
 # ─── 學習與報告 ───
 
 # 手動標記廣告文字，讓程式學習新模式
-python teleshield.py --learn "加微信 abc123 投資穩賺日入過萬"
+teleshield --learn "加微信 abc123 投資穩賺日入過萬"
 
 # 查看封鎖摘要
-python teleshield.py --report         # 過去 24 小時
-python teleshield.py --report week    # 過去 7 天 + 趨勢
+teleshield --report         # 過去 24 小時
+teleshield --report week    # 過去 7 天 + 趨勢
 
 # ─── 名單管理 ───
 
 # 白名單（永不封鎖）
-python teleshield.py --whitelist add 12345678
-python teleshield.py --whitelist list
+teleshield --whitelist add 12345678
+teleshield --whitelist list
 
 # 黑名單（見一個封一個）
-python teleshield.py --blacklist add 87654321
-python teleshield.py --blacklist remove 87654321
+teleshield --blacklist add 87654321
+teleshield --blacklist remove 87654321
 
 # 查看完整狀態
-python teleshield.py --status
+teleshield --status
 ```
 
 ---
@@ -165,10 +170,10 @@ TeleShield 支援自動管理你具有**管理員權限**的群組：
 
 ```bash
 # 範例：標記一個包含 URL 的廣告
-python teleshield.py --learn "https://bit.ly/3XabcDe 免費領取 BTC"
+teleshield --learn "https://bit.ly/3XabcDe 免費領取 BTC"
 
 # 範例：標記一個 LINE/微信推廣
-python teleshield.py --learn "➕官方LINE：@free888 每日推薦飆股"
+teleshield --learn "➕官方LINE：@free888 每日推薦飆股"
 ```
 
 學習機制：
@@ -188,10 +193,10 @@ python teleshield.py --learn "➕官方LINE：@free888 每日推薦飆股"
 
 ```bash
 # 每日報告
-python teleshield.py --report
+teleshield --report
 
 # 每週報告（含每日趨勢）
-python teleshield.py --report week
+teleshield --report week
 ```
 
 報告內容：

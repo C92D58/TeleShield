@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "teleshield"
+version = "0.9.0"
+description = "Telegram 全能廣告封鎖守衛 — personal spam firewall for private messages & groups"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+authors = [{ name = "WAHSUN", email = "x@wahsun.org" }]
+keywords = ["telegram", "spam", "antispam", "telethon", "blocker"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Communications :: Chat",
+]
+
+dependencies = [
+    "Telethon>=1.44",
+]
+
+[project.optional-dependencies]
+ocr = ["Pillow>=9", "pytesseract>=0.3.10"]
+dev = [
+    "pytest>=7",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+teleshield = "teleshield.cli:entry"
+
+[tool.setuptools]
+packages = ["teleshield"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
