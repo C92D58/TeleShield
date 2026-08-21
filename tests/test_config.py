@@ -36,6 +36,18 @@ class TestConfig:
         (isolated_home / "config.json").write_text("{broken json")
         assert config.load_config() == {}
 
+    def test_secure_session_file_600(self, isolated_home):
+        # Telethon session 文件默認 644——secure_session_file 應收緊為 600
+        session = isolated_home / "user.session"
+        session.write_bytes(b"fake telethon session data")
+        session.chmod(0o644)
+        config.secure_session_file()
+        assert session.stat().st_mode & 0o777 == 0o600
+
+    def test_secure_session_file_missing(self, isolated_home):
+        # session 不存在時不應報錯
+        config.secure_session_file()
+
 
 class TestBlockLog:
     def test_load_empty(self, isolated_home):

@@ -26,6 +26,7 @@ __all__ = [
     "log_block",
     "load_learned_patterns",
     "save_learned_patterns",
+    "secure_session_file",
     "is_blacklisted",
     "is_whitelisted",
 ]
@@ -81,6 +82,20 @@ def _atomic_write_text(path: Path, text: str) -> None:
     except OSError:
         pass
     tmp.replace(path)
+
+
+def secure_session_file() -> None:
+    """收緊 Telethon session 文件權限為 600。
+
+    Telethon 的 SQLiteSession 創建文件時不設權限（默認 umask 644），
+    而 session 內含 Telegram 登入憑證（auth key，等價帳號控制權）。
+    必須在每次 client.start() 後調用。
+    """
+    if SESSION_FILE.exists():
+        try:
+            os.chmod(SESSION_FILE, 0o600)
+        except OSError:
+            pass
 
 
 def load_config() -> dict:

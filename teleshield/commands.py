@@ -24,6 +24,7 @@ from .config import (
     log_block,
     save_config,
     save_learned_patterns,
+    secure_session_file,
 )
 from .ocr import check_photo
 from .patterns import SPAM_PATTERNS, learn_from_text
@@ -65,6 +66,7 @@ async def setup(api_id: str = None, api_hash: str = None, phone: str = None, cod
 
     try:
         await client.start(phone=phone, code_callback=lambda: code or input("請輸入驗證碼: "))
+        secure_session_file()
         me = await client.get_me()
         print("\n✅ 登入成功！")
         print(f"   帳號: {me.first_name} (@{me.username or '無'})")
@@ -127,6 +129,7 @@ async def scan_and_block(dry_run: bool = False):
     client = get_client(cfg)
     try:
         await client.start(phone=cfg["phone"])
+        secure_session_file()
 
         contacts = (await client(GetContactsRequest(hash=0))).users
         contact_ids = {c.id for c in contacts}
@@ -214,6 +217,7 @@ async def scan_groups(dry_run: bool = False):
     client = get_client(cfg)
     try:
         await client.start(phone=cfg["phone"])
+        secure_session_file()
         me = await client.get_me()
         now = datetime.now(timezone.utc)
 
@@ -507,6 +511,7 @@ async def listen():
 
     try:
         await client.start(phone=cfg["phone"])
+        secure_session_file()
         print("✅ TeleShield 已上線 — 監聽中...")
         await client.run_until_disconnected()
     except KeyboardInterrupt:
@@ -710,7 +715,7 @@ def _render_html_report(recent, total, sources, reasons, period, label):
 
     rows = ""
     for b in recent[-30:]:
-        src = source_map.get(b.get("source", ""), b.get("source", ""))
+        src = _html.escape(source_map.get(b.get("source", ""), str(b.get("source", ""))))
         rows += (
             f"<tr><td class='muted'>{_html.escape(str(b.get('time',''))[5:16])}</td>"
             f"<td>{src}</td><td class='muted'>{_html.escape(str(b.get('user_id','')))}</td>"
