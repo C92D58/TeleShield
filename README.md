@@ -1,7 +1,7 @@
 <div align="center">
   <h1>🛡️ TeleShield</h1>
-  <p><strong>Telegram 全能廣告封鎖守衛</strong><br>
-  <em>Your personal Telegram spam firewall — private messages & group management, all in one.</em></p>
+  <p><strong>All-round Telegram spam firewall for your personal account</strong><br>
+  <em>Private message blocking &amp; group moderation — all in one.</em></p>
 
   <p>
     <img src="https://img.shields.io/badge/python-3.9%2B-blue" alt="Python">
@@ -10,356 +10,354 @@
     <img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2FC92D58%2FTeleShield%2Freleases%2Flatest&query=%24.tag_name&label=release&color=22C55E" alt="Release">
   </p>
   <p>
-    <a href="https://teleshield.wahsun.org">🌐 產品頁面</a>
+    <a href="https://teleshield.wahsun.org">🌐 Product Page</a>
     ·
-    <a href="https://github.com/c92d58/TeleShield/releases/latest">📦 下載</a>
+    <a href="https://github.com/c92d58/TeleShield/releases/latest">📦 Download</a>
     ·
-    <a href="https://github.com/c92d58/TeleShield#-快速開始--quick-start">🚀 快速開始</a>
+    <a href="https://github.com/c92d58/TeleShield#-quick-start">🚀 Quick Start</a>
   </p>
 </div>
 
 ---
 
-## 📋 概述 / Overview
+## 📋 Overview
 
-**TeleShield** 是一個全功能的 Telegram 廣告防禦工具，涵蓋 **個人私訊封鎖** 與 **群組踢除** 兩大場景。不同於 Bot API，它直接以你的身份登入，能處理 Bot 做不到的個人帳號防護。
-
-*TeleShield is a full-featured Telegram spam defense system covering **private DM blocking** and **group moderation**. It logs in as you — something Bot API bots cannot do.*
+**TeleShield** is a full-featured Telegram spam defense system covering **private DM blocking** and **group moderation**. Unlike Bot API bots, it logs in as you — handling the personal-account protection that bots simply cannot.
 
 ---
 
-## ✨ 功能 / Features
+## ✨ Features
 
-| 功能 | 命令 | 說明 |
-|------|------|------|
-| **私訊掃描** | `--scan` | 掃描近期非聯絡人對話，比對廣告模式並封鎖 |
-| **群組掃描** | `--group-scan` | 掃描群組近期訊息，踢除發廣告的成員（需管理員權限） |
-| **即時監聽** | `--listen` | 後台常駐，**同時監控私訊+群組**，秒級響應 |
-| **評分引擎** | 內建 | 多維垃圾訊號評分（分級正則/連結密度/@提及/弱帳號特徵/頻率），自動區分 封鎖/標記/放行 |
-| **群組行為分析** | 內建 | 新成員進群秒發連結、刷屏廣告 → 自動踢除 |
-| **試運行** | `--dry-run` | 安全預覽，只顯示結果不實際封鎖/踢除 |
-| **圖片 OCR** | 內建 | 純圖片廣告 → Tesseract 本地辨識文字 → 模式比對，**資料不外傳** |
-| **學習模式** | `--learn <文字>` | 手動標記廣告，自動提取關鍵詞+生成正則模式 |
-| **封鎖報告** | `--report [day\|week]`、`--report-html` | 每日/每週摘要 + **HTML 可視化報告**（類別統計/趨勢/明細） |
-| **黑名單** | `--blacklist add\|remove\|list\|import\|export [id\|file]` | 加入黑名單後自動封鎖/踢除；**JSON 交換**共享 community 名單 |
-| **白名單** | `--whitelist add\|remove\|list\|import\|export [id\|file]` | 白名單用戶永不被掃描、封鎖或踢除 |
-| **狀態面板** | `--status` | 一覽封鎖數、踢除數、名單和學習模式狀態 |
+| Feature | Command | Description |
+|---------|---------|-------------|
+| **DM scan** | `--scan` | Scans recent non-contact conversations, matches spam patterns, blocks |
+| **Group scan** | `--group-scan` | Scans recent group messages, kicks ad senders (admin required) |
+| **Live listener** | `--listen` | Runs in the background, **watching DMs + groups** with second-level response |
+| **Scoring engine** | built-in | Multi-signal spam scoring (tiered regex / link density / @ mentions / weak account traits / frequency) — automatically decides block / flag / pass |
+| **Group behavior analysis** | built-in | New members posting links instantly, message-flood ads → auto kick |
+| **Dry run** | `--dry-run` | Safe preview — shows results without blocking or kicking |
+| **Image OCR** | built-in | Image-only ads → local Tesseract text recognition → pattern match; **data never leaves your machine** |
+| **Learn mode** | `--learn <text>` | Manually flag spam; extracts keywords and generates regex patterns automatically |
+| **Block reports** | `--report [day\|week]`, `--report-html` | Daily/weekly summaries + **HTML visual reports** (category stats / trends / details) |
+| **Blacklist** | `--blacklist add\|remove\|list\|import\|export [id\|file]` | Auto block/kick on sight; **JSON exchange** for community lists |
+| **Whitelist** | `--whitelist add\|remove\|list\|import\|export [id\|file]` | Whitelisted users are never scanned, blocked or kicked |
+| **Status panel** | `--status` | Overview of blocks, kicks, lists and learn-mode state |
 
 ---
 
-## 🚀 快速開始 / Quick Start
+## 🚀 Quick Start
 
-### 前置需求 / Prerequisites
+### Prerequisites
 
 - Python 3.9+
-- Telegram API 憑證（[my.telegram.org/apps](https://my.telegram.org/apps)）
-- （選用）Tesseract OCR 用於圖片廣告辨識
+- Telegram API credentials from [my.telegram.org/apps](https://my.telegram.org/apps)
+- (Optional) Tesseract OCR for image-ad detection
 
-### 安裝 / Install
+### Install
 
-**方式一：一鍵安裝（推薦）**
+**Option 1: one-click install (recommended)**
 
 ```bash
 git clone https://github.com/c92d58/TeleShield.git
 cd TeleShield
-bash install.sh          # 檢查依賴 + pip 安裝 + 建立數據目錄
+bash install.sh          # checks dependencies + pip install + creates data directory
 ```
 
-**方式二：pip 直接安裝**
+**Option 2: install via pip**
 
 ```bash
 pip install "teleshield[ocr]"
-# 圖片 OCR 系統依賴（選用，強烈建議）
+# system dependency for OCR (optional but strongly recommended)
 apt install tesseract-ocr tesseract-ocr-chi-sim
 ```
 
-### 首次設定 / First-time Setup
+### First-time setup
 
 ```bash
 teleshield --setup
 ```
 
-依序輸入：
-1. `API ID` — 從 [my.telegram.org/apps](https://my.telegram.org/apps) 取得
-2. `API Hash` — 同上
-3. `手機號碼` — 含國碼，如 `+852****5931`
-4. `驗證碼` — Telegram 會發送驗證碼到你手機
+Enter, in order:
+1. `API ID` — from [my.telegram.org/apps](https://my.telegram.org/apps)
+2. `API Hash` — same source
+3. `Phone number` — with country code, e.g. `+852****5931`
+4. `Verification code` — Telegram sends it to your phone
 
-> **安全提示**：憑證也可寫入 `~/.teleshield/.env`（`TELESHIELD_API_ID` / `TELESHIELD_API_HASH` / `TELESHIELD_PHONE`），`--setup` 會自動讀取。**切勿**用命令行參數傳憑證（會洩漏到 shell history）。
+> **Security note**: credentials can also be written to `~/.teleshield/.env` (`TELESHIELD_API_ID` / `TELESHIELD_API_HASH` / `TELESHIELD_PHONE`), and `--setup` reads them automatically. **Never** pass credentials as command-line arguments — they would leak into your shell history.
 
-登入成功後自動儲存 Session（`~/.teleshield/`），下次不需重複登入。
+After a successful login the session is saved under `~/.teleshield/`; you won't need to log in again.
 
-### 基本用法 / Usage
+### Basic usage
 
 ```bash
-# ─── 私訊防護 ───
+# ─── DM protection ───
 
-# 先試運行看看結果
+# dry run first to preview the results
 teleshield --dry-run
 
-# 實際掃描近期待處理的廣告
+# actually scan recent DM spam
 teleshield --scan
 
-# 啟動即時監聽（後台常駐，私訊+群組全保護）
+# start the live listener (background; full DM + group protection)
 teleshield --listen
 
-# ─── 群組管理 ───
+# ─── Group moderation ───
 
-# 掃描所有管理中的群組，踢除廣告發送者
+# scan all groups you moderate, kick ad senders
 teleshield --group-scan
 
-# ─── 學習與報告 ───
+# ─── Learning & reports ───
 
-# 手動標記廣告文字，讓程式學習新模式
+# manually flag spam text so the program learns new patterns
 teleshield --learn "加微信 abc123 投資穩賺日入過萬"
 
-# 查看封鎖摘要
-teleshield --report         # 過去 24 小時
-teleshield --report week    # 過去 7 天 + 趨勢
-teleshield --report-html    # 生成 HTML 可視化報告（~/.teleshield/report_week.html）
+# view block summaries
+teleshield --report         # last 24 hours
+teleshield --report week    # last 7 days + trend
+teleshield --report-html    # generates an HTML report (~/.teleshield/report_week.html)
 
-# ─── 名單管理 ───
+# ─── List management ───
 
-# 白名單（永不封鎖）
+# whitelist (never blocked)
 teleshield --whitelist add 12345678
 teleshield --whitelist list
 
-# 黑名單（見一個封一個）
+# blacklist (blocked on sight)
 teleshield --blacklist add 87654321
 
-# community 名單交換（JSON 格式）
+# community list exchange (JSON)
 teleshield --blacklist export my_list.json
 teleshield --blacklist import community.json
 teleshield --blacklist remove 87654321
 
-# 查看完整狀態
+# full status
 teleshield --status
 ```
 
 ---
 
-## 📖 完整命令參考 / Full Command Reference
+## 📖 Full Command Reference
 
-| 命令 | 說明 |
-|------|------|
-| `--setup` | 首次設定（憑證用**環境變數** `TELESHIELD_API_ID`/`TELESHIELD_API_HASH`/`TELESHIELD_PHONE` 或交互輸入，**勿用參數**） |
-| `--scan` | 掃描非聯絡人私訊，封鎖廣告 |
-| `--dry-run` | 試運行掃描（不實際封鎖） |
-| `--listen` | **即時監聽模式** — 私訊封鎖 + 群組踢除 + 行為分析同時運作 |
-| `--group-scan` | 掃描管理中的群組，踢除廣告發送者 |
-| `--status` | 查看完整狀態面板 |
-| `--report [day\|week]` | 封鎖摘要報告（預設 day） |
-| `--report-html [day\|week]` | 生成 HTML 可視化報告（`~/.teleshield/report_<period>.html`） |
-| `--learn <文字>` | 手動標記廣告文字，自動學習新模式 |
-| `--whitelist add\|remove\|list\|import\|export [user_id\|file]` | 白名單管理（import/export 為 JSON 交換） |
-| `--blacklist add\|remove\|list\|import\|export [user_id\|file]` | 黑名單管理（import/export 為 JSON 交換） |
-
----
-
-## 👥 群組管理詳解
-
-TeleShield 支援自動管理你具有**管理員權限**的群組：
-
-| 場景 | 行為 |
-|------|------|
-| `--listen` 運行中 | 群組內有新訊息 → 自動檢測 → 踢除廣告發送者 |
-| `--group-scan` | 掃描最近 20 條訊息 → 批次踢除 |
-| 管理員自動跳過 | 群組管理員和創建者不受影響 |
-| 白名單跳過 | 白名單中的用戶不會被踢除 |
-| 3 天窗口 | 只檢查最近 3 天內的訊息 |
-
-踢除使用 **ChatBannedRights(view_messages=True)**，相當於 Telegram 的「封鎖用戶 + 移除」，對方無法再次加入。
+| Command | Description |
+|---------|-------------|
+| `--setup` | First-time setup (credentials via **environment variables** `TELESHIELD_API_ID` / `TELESHIELD_API_HASH` / `TELESHIELD_PHONE` or interactive input — **not arguments**) |
+| `--scan` | Scans non-contact DMs and blocks spam |
+| `--dry-run` | Dry-run scan (does not actually block) |
+| `--listen` | **Live listener** — DM blocking + group kicking + behavior analysis at once |
+| `--group-scan` | Scans moderated groups and kicks ad senders |
+| `--status` | Full status panel |
+| `--report [day\|week]` | Block summary (default: day) |
+| `--report-html [day\|week]` | Generates an HTML visual report (`~/.teleshield/report_<period>.html`) |
+| `--learn <text>` | Manually flags spam text and learns new patterns |
+| `--whitelist add\|remove\|list\|import\|export [user_id\|file]` | Whitelist management (import/export via JSON) |
+| `--blacklist add\|remove\|list\|import\|export [user_id\|file]` | Blacklist management (import/export via JSON) |
 
 ---
 
-## 🧠 學習模式詳解
+## 👥 Group Moderation in Detail
 
-遇到新模式廣告時，使用 `--learn` 讓 TeleShield 自動學習：
+TeleShield can automatically moderate any group where you have **admin rights**:
+
+| Scenario | Behavior |
+|----------|----------|
+| `--listen` running | New group message → auto-detect → kick the ad sender |
+| `--group-scan` | Scans the last 20 messages → batch kicks |
+| Admins skipped | Group admins and the creator are never affected |
+| Whitelist skipped | Whitelisted users are never kicked |
+| 3-day window | Only messages from the last 3 days are examined |
+
+Kicks use **ChatBannedRights(view_messages=True)** — Telegram's "block + remove", so the user cannot rejoin.
+
+---
+
+## 🧠 Learn Mode in Detail
+
+When you meet a new spam pattern, use `--learn` to teach TeleShield:
 
 ```bash
-# 範例：標記一個包含 URL 的廣告
+# Example: flag an ad containing a URL
 teleshield --learn "https://bit.ly/3XabcDe 免費領取 BTC"
 
-# 範例：標記一個 LINE/微信推廣
+# Example: flag a LINE/WeChat promotion
 teleshield --learn "➕官方LINE：@free888 每日推薦飆股"
 ```
 
-學習機制：
+How learning works:
 
-| 步驟 | 說明 |
-|------|------|
-| 🔍 提取關鍵詞 | 過濾停用詞，提取 2-6 字高價值關鍵詞 |
-| 🧩 生成正則 | 自動從 URL、ID 等結構生成可複用的模式 |
-| 💾 持久儲存 | 保存在 `config.json` 中，每次啟動載入 |
-| 🔄 即時生效 | 學習後 `is_spam()` 立即使用新模式 |
+| Step | Description |
+|------|-------------|
+| 🔍 Extract keywords | filters stopwords, extracts high-value 2–6 character keywords |
+| 🧩 Generate regex | builds reusable patterns from URLs, IDs and other structures |
+| 💾 Persistent storage | saved in `config.json`, loaded on every start |
+| 🔄 Immediate effect | `is_spam()` uses the new patterns right away |
 
-累計學習結果可透過 `--status` 查看。
-
----
-
-## 🧠 垃圾訊號評分引擎（v0.10.0）
-
-取代單層正則判定——多維信號加權評分，自動區分 **封鎖 / 標記 / 放行**：
-
-| 信號 | 加分 |
-|------|------|
-| 分級正則命中（高危 severe / 中危 moderate / 低危 low） | +3 / +2 / +1（語義簇獨立疊加） |
-| 學習模式（關鍵詞/自訂正則） | +2 |
-| 連結密度（≥3 個 URL） | +1 |
-| 大量 @ 提及（≥2） | +1 |
-| 弱帳號特徵（無 username/頭像/bio 至少 2 項） | +1 |
-| 短時間消息爆發（≥5 條） | +1 |
-
-**決策閾值**：
-- **≥5 分** → `block`（私訊封鎖 / 群組踢除）
-- **≥3 分** → `flag`（僅記錄標記，不採取動作——可在 `--report` 觀察）
-- **<3 分** → `pass`（放行，避免誤封正常對話）
-
-設計重點：單一弱信號（如一個 t.me 連結、單個「投資」詞）**不會**誤判；多個信號組合才升級。所有判定輸出顯示分數。
+View accumulated learning results via `--status`.
 
 ---
 
-## 🔍 群組行為分析（v0.10.0）
+## 🧠 Spam Scoring Engine (v0.10.0)
 
-`--listen` 模式下自動監控群組內可疑行為模式：
+Replaces single-layer regex decisions — multi-dimensional weighted scoring that automatically picks **block / flag / pass**:
 
-| 行為 | 閾值 | 動作 |
-|------|------|------|
-| 新成員進群後發連結 | 進群 5 分鐘內 | **自動踢除** |
-| 刷屏廣告（含連結消息） | 120 秒內 ≥3 條 | **自動踢除** |
-| 大量 @ 提及刷屏 | 120 秒內 ≥3 條 | **自動踢除** |
+| Signal | Points |
+|--------|--------|
+| Tiered regex hit (high risk / medium / low) | +3 / +2 / +1 (semantic clusters stack independently) |
+| Learned patterns (keywords / custom regex) | +2 |
+| Link density (≥3 URLs) | +1 |
+| Heavy @ mentions (≥2) | +1 |
+| Weak account traits (no username/avatar/bio — at least 2) | +1 |
+| Message burst (≥5 in a short window) | +1 |
 
-行為分析獨立於文字評分——即使連結文字不命中任何模式（短網址/圖片），行為特徵也會觸發。記錄標記為 `[behavior]` 原因。
+**Decision thresholds:**
+- **≥5 points** → `block` (block in DMs / kick in groups)
+- **≥3 points** → `flag` (record only, no action — watch it in `--report`)
+- **<3 points** → `pass` (let through, avoiding false positives)
+
+Design note: a single weak signal (one t.me link, one "投資/invest" word) will **not** cause a false positive; only combined signals escalate. Every verdict prints its score.
 
 ---
 
-## 📊 封鎖報告
+## 🔍 Group Behavior Analysis (v0.10.0)
+
+In `--listen` mode, suspicious behavior patterns inside groups are monitored automatically:
+
+| Behavior | Threshold | Action |
+|----------|-----------|--------|
+| New member posts a link after joining | within 5 minutes of joining | **auto kick** |
+| Flooding ads (including links) | ≥3 messages in 120 s | **auto kick** |
+| Mass @ mention flooding | ≥3 messages in 120 s | **auto kick** |
+
+Behavior analysis is independent of text scoring — even when link text matches no pattern (short URLs / images), the behavior still triggers. Records are marked with the reason `[behavior]`.
+
+---
+
+## 📊 Block Reports
 
 ```bash
-# 每日報告
+# daily report
 teleshield --report
 
-# 每週報告（含每日趨勢）
+# weekly report (includes daily trend)
 teleshield --report week
 ```
 
-報告內容：
+Sample report:
 
 ```
-📊 封鎖摘要 — 過去 24 小時
+📊 Block summary — last 24 hours
 ────────────────────────────
-   總計封鎖: 12 人
+   Total blocked: 12
 
-   來源:
-     • 私訊: 10 人
-     • 群組: 2 人
+   Source:
+     • DMs: 10
+     • Groups: 2
 
-   廣告類型 Top 5:
-     • 投資理財: 5 次
-     • 兼職詐騙: 3 次
-     • 色情: 2 次
-     • 賭博: 1 次
-     • 英文 Spam: 1 次
+   Top 5 ad categories:
+     • Investment scams: 5
+     • Part-time job scams: 3
+     • Adult content: 2
+     • Gambling: 1
+     • English spam: 1
 
-   每日趨勢:
-     2026-07-14: 12 人
+   Daily trend:
+     2026-07-14: 12
 ```
 
 ---
 
-## 🔍 廣告識別模式 / Spam Patterns
+## 🔍 Spam Patterns
 
-TeleShield 內建 **30+ 分級正則**（繁簡並收），加上學習模式可無限擴充：
+TeleShield ships with **30+ tiered regexes** (covering both Traditional and Simplified Chinese), infinitely extendable through learn mode:
 
-| 級別 | 類別 | 範例 |
-|------|------|------|
-| 🔴 **高危** | 引流 | 加我微信、加V、V信、vx |
-| 🔴 **高危** | 色情 | 裸聊、約炮、援交、成人 |
-| 🔴 **高危** | 賭博 | 賭博、六合彩、下注、casino、betting |
-| 🔴 **高危** | 兼職詐騙 | 兼職、刷單、日入、躺賺、在家工作 |
-| 🟠 **中危** | 投資理財 | 投資、帶單、跟單、量化、穩賺、高回報 |
-| 🟠 **中危** | 交易出售 | 出售、批發、代購、代發、清倉 |
-| 🟠 **中危** | 假優惠 | 註冊送、免費領、紅包、優惠碼 |
-| 🟠 **中危** | 刷量 | 點讚、刷粉、刷讚、漲粉 |
-| 🟡 **低危** | 弱信號 | t.me 連結、@ 提及、tg 帳號、click here |
+| Level | Category | Examples |
+|-------|----------|----------|
+| 🔴 **High risk** | Traffic funneling | 加我微信、加V、V信、vx |
+| 🔴 **High risk** | Adult content | 裸聊、約炮、援交、成人 |
+| 🔴 **High risk** | Gambling | 賭博、六合彩、下注、casino、betting |
+| 🔴 **High risk** | Job-scam | 兼職、刷單、日入、躺賺、在家工作 |
+| 🟠 **Medium** | Investment | 投資、帶單、跟單、量化、穩賺、高回報 |
+| 🟠 **Medium** | Selling | 出售、批發、代購、代發、清倉 |
+| 🟠 **Medium** | Fake offers | 註冊送、免費領、紅包、優惠碼 |
+| 🟠 **Medium** | Engagement farming | 點讚、刷粉、刷讚、漲粉 |
+| 🟡 **Low** | Weak signals | t.me links、@ mentions、tg accounts、click here |
 
-> **繁簡雙收**：每類模式同時覆蓋繁體與簡體（如 賭博/赌博、穩賺/稳赚），中港台廣告一網打盡。
-> **誤封防護**：單字（出/博/彩/售）已移除，改語義簇組合；單一弱信號不判定。
-
----
-
-## ⚙️ 安全性與權限
-
-### 身分驗證
-
-- 使用 **MTProto**（Telegram 官方協議）直接登入，非 Bot API
-- Session 文件（`~/.teleshield/user.session`）使用 Telethon 內部加密儲存，且 **自動 chmod 600**（防止同機其他用戶讀取登入憑證）
-- API 憑證僅儲存在本地 `~/.teleshield/config.json`（原子寫入 + chmod 600）或 `.env`
-- 憑證**不接受命令行參數**（避免洩漏到 shell history），只走環境變數或交互輸入
-
-### 權限需求
-
-| 功能 | 所需權限 |
-|------|---------|
-| 私訊封鎖 | 無需額外權限（任何帳號皆可封鎖他人） |
-| 群組踢除 | **群組管理員**（需 ban_users 權限） |
-| 圖片 OCR | 本地 Tesseract，無需網路權限 |
-
-### 風險說明
-
-- Session 文件 = 你的 Telegram 身份，程式已自動設為 600 權限，請勿刪除或分享
-- 群組踢除不可逆，使用 `--group-scan dry` 預覽再執行
-- 所有敏感文件（config.json / block_log.json / learned_patterns.json / .env）均自動 chmod 600
+> **Both scripts covered**: every category matches Traditional and Simplified Chinese (e.g. 賭博/赌博, 穩賺/稳赚) — ads from HK, TW and CN are all caught.
+> **False-positive protection**: single characters (出/博/彩/售) were removed in favor of semantic clusters; a lone weak signal never triggers a verdict.
 
 ---
 
-## 🗂️ 專案結構 / Project Structure
+## ⚙️ Security & Permissions
+
+### Authentication
+
+- Logs in via **MTProto** (Telegram's official protocol), not Bot API
+- The session file (`~/.teleshield/user.session`) is stored with Telethon's internal encryption and **auto-chmod 600** (protects login credentials from other users on the same machine)
+- API credentials are stored only in local `~/.teleshield/config.json` (atomic write + chmod 600) or `.env`
+- Credentials are **never accepted as command-line arguments** (no shell-history leaks) — environment variables or interactive input only
+
+### Required permissions
+
+| Feature | Required permission |
+|---------|---------------------|
+| DM blocking | none (any account can block others) |
+| Group kicking | **group admin** (needs ban_users) |
+| Image OCR | local Tesseract, no network permission needed |
+
+### Risk notes
+
+- The session file *is* your Telegram identity — it is chmod 600 automatically; never delete or share it
+- Group kicks are irreversible — preview with `--group-scan dry` first
+- All sensitive files (config.json / block_log.json / learned_patterns.json / .env) are chmod 600 automatically
+
+---
+
+## 🗂️ Project Structure
 
 ```
 TeleShield/
-├── teleshield/            # Python 包
-│   ├── __init__.py        # 版本定義（單一來源）
-│   ├── __main__.py        # python -m teleshield 入口
-│   ├── cli.py             # 命令解析與分派
-│   ├── commands.py        # 核心動作（掃描/監聽/報告/名單）
-│   ├── config.py          # 路徑/.env/存儲（原子寫 + chmod 600）
-│   ├── patterns.py        # 分級廣告模式（severe/moderate/low，繁簡雙收）
-│   ├── scoring.py         # 垃圾訊號評分引擎（v0.10.0）
-│   ├── behavior.py        # 群組行為分析（v0.10.0）
-│   ├── ocr.py             # 本地 Tesseract OCR（資料不外傳）
-│   └── client.py          # Telethon 客戶端工廠
-├── tests/                 # pytest 69 用例（誤封回歸/評分/行為/存儲）
-├── .github/workflows/     # CI（ruff + pytest 3 版本 + build + 自動 Release）
-├── pyproject.toml         # 打包配置（pip install teleshield）
-├── install.sh             # 一鍵安裝腳本
-├── .env.example           # 環境變數範例
+├── teleshield/            # Python package
+│   ├── __init__.py        # version definition (single source)
+│   ├── __main__.py        # python -m teleshield entry point
+│   ├── cli.py             # command parsing & dispatch
+│   ├── commands.py        # core actions (scan/listen/report/lists)
+│   ├── config.py          # paths/.env/storage (atomic writes + chmod 600)
+│   ├── patterns.py        # tiered spam patterns (severe/moderate/low, both scripts)
+│   ├── scoring.py         # spam scoring engine (v0.10.0)
+│   ├── behavior.py        # group behavior analysis (v0.10.0)
+│   ├── ocr.py             # local Tesseract OCR (data stays local)
+│   └── client.py          # Telethon client factory
+├── tests/                 # 69 pytest cases (false-positive regression/scoring/behavior/storage)
+├── .github/workflows/     # CI (ruff + pytest on 3 versions + build + auto Release)
+├── pyproject.toml         # packaging (pip install teleshield)
+├── install.sh             # one-click install script
+├── .env.example           # environment variable example
 ├── README.md
 └── LICENSE
 
-~/.teleshield/             # 運行後自動生成（chmod 600）
-├── user.session           # Telegram 登入 Session（加密 + 600）
-├── config.json            # 設定 + 學習模式 + 名單
-├── learned_patterns.json  # 學習模式獨立存儲
-├── block_log.json         # 封鎖記錄（用於報告）
-├── .env                   # 憑證（可選）
-└── report_*.html          # HTML 報告（--report-html）
+~/.teleshield/             # auto-generated at runtime (chmod 600)
+├── user.session           # Telegram login session (encrypted + 600)
+├── config.json            # settings + learned patterns + lists
+├── learned_patterns.json  # learn-mode patterns, separate storage
+├── block_log.json         # block records (used for reports)
+├── .env                   # credentials (optional)
+└── report_*.html          # HTML reports (--report-html)
 ```
 
 ---
 
-## 🧩 後續計劃 / Roadmap
+## 🧩 Roadmap
 
-**已完成（v0.10.0）**：
-- [x] Phase 1 工程化：模組化重構、.env 配置、pytest 測試框架、CI/CD、pip 打包、install.sh
-- [x] Phase 2 功能增強：多級規則引擎（分級正則）、垃圾訊號評分、群組行為分析、HTML 報告、community 名單 import/export
-- [x] 安全審計修復：session/config 600 權限、憑證 env 化、繁簡雙收、誤封回歸測試
+**Done (v0.10.0):**
+- [x] Phase 1 engineering: modular refactor, .env configuration, pytest framework, CI/CD, pip packaging, install.sh
+- [x] Phase 2 features: tiered rule engine, spam scoring, group behavior analysis, HTML reports, community list import/export
+- [x] Security-audit fixes: session/config 600 permissions, env-based credentials, both-script coverage, false-positive regression tests
 
-**待辦**：
-- [ ] Phase 3：systemd 一鍵部署（常駐 + 日誌輪轉 + 自動重啟）
-- [ ] 自動更新（檢查 GitHub Release + 校驗和）
-- [ ] ML 分類器（本地樸素貝葉斯，用 block_log 訓練）
-- [ ] Web Dashboard（查看封鎖統計 + 管理名單）
-- [ ] 雲端名單同步（可選，黑白名單 → CF KV）
+**Planned:**
+- [ ] Phase 3: systemd one-click deployment (daemon + log rotation + auto-restart)
+- [ ] Auto-update (checks GitHub Release + checksum)
+- [ ] ML classifier (local Naive Bayes trained on block_log)
+- [ ] Web dashboard (view block stats + manage lists)
+- [ ] Cloud list sync (optional, black/white lists → CF KV)
 
 ---
 
@@ -370,5 +368,5 @@ TeleShield/
 ---
 
 <div align="center">
-  <sub>Made with ❤️ by WAHSUN · 讓 Telegram 清淨一點</sub>
+  <sub>Made with ❤️ by WAHSUN · Keep Telegram clean</sub>
 </div>
