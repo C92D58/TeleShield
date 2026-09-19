@@ -1,0 +1,60 @@
+{
+  "_about": "決定層的標註集。用來調 decide.Thresholds，以及量『有多少工作量真的需要語意層』。",
+  "_provenance": {
+    "source": "全部從既有的 pytest 案例逐字抽出，沒有自行編造",
+    "from": "tests/test_patterns.py（TestSpamDetection / TestFalsePositiveRegression）、tests/test_scoring.py",
+    "extracted": "2026-09-19"
+  },
+  "_schema": {
+    "text": "訊息原文",
+    "label": "spam = 應該封鎖；legit = 不該封鎖",
+    "layer": "regex = 規則層就該抓到（免費）；semantic = 需要語意判斷（花錢）；either = 兩者皆可",
+    "note": "為什麼這樣標；ambiguous 的案子要寫清楚『不確定的點在哪』"
+  },
+  "_warning": "★ label 是『最終該不該封』，不是『正則該不該命中』。兩者不同：一則真正的廣告可能完全沒有關鍵詞，一則正常訊息可能剛好含關鍵詞。",
+
+  "cases": [
+    { "text": "加我微信 xiaoming888",              "label": "spam",  "layer": "regex",    "note": "引流廣告，加微信是明確意圖（test_spam_hits）" },
+    { "text": "加V xiaoming888",                   "label": "spam",  "layer": "regex",    "note": "同上，加 V 變體（test_spam_hits）" },
+    { "text": "兼职刷单 日入500",                  "label": "spam",  "layer": "regex",    "note": "兼職刷單簇（test_spam_hits）" },
+    { "text": "投资理财稳赚 高回报",               "label": "spam",  "layer": "regex",    "note": "多簇疊加（test_spam_hits）" },
+    { "text": "裸聊约炮 包养",                     "label": "spam",  "layer": "regex",    "note": "色情類（test_spam_hits）" },
+    { "text": "赌博 六合彩 投注",                  "label": "spam",  "layer": "regex",    "note": "賭博類（test_spam_hits）" },
+    { "text": "注册送红包 免费领",                 "label": "spam",  "layer": "regex",    "note": "誘導註冊（test_spam_hits）" },
+    { "text": "刷粉涨粉 点赞关注",                 "label": "spam",  "layer": "regex",    "note": "刷量服務（test_spam_hits）" },
+    { "text": "出售批发 代购代发",                 "label": "spam",  "layer": "regex",    "note": "批發引流（test_spam_hits）" },
+    { "text": "earn money work from home",         "label": "spam",  "layer": "regex",    "note": "英文廣告（test_spam_hits）" },
+    { "text": "free bitcoin airdrop",              "label": "spam",  "layer": "regex",    "note": "加密貨幣空投詐騙（test_spam_hits）" },
+    { "text": "limited offer 50% off",             "label": "spam",  "layer": "regex",    "note": "英文促銷（test_spam_hits）" },
+    { "text": "快来赌博 稳赢 https://evil.com",     "label": "spam",  "layer": "regex",    "note": "賭博＋連結（test_scoring）" },
+    { "text": "高回报投资 稳赚",                   "label": "spam",  "layer": "regex",    "note": "投資詐騙簇（test_scoring）" },
+    { "text": "稳赚 https://t.me/joinchat/abc",    "label": "spam",  "layer": "regex",    "note": "學習詞＋連結（test_scoring）" },
+    { "text": "加我微信 abc123",                   "label": "spam",  "layer": "regex",    "note": "學習到的帳號模式（test_scoring）" },
+
+    { "text": "快來 t.me/joinchat/xxx",            "label": "spam",  "layer": "semantic", "note": "★ 單一 t.me 連結。正則刻意不擋（弱信號）；但一則陌生私訊只丟一個群組連結，意圖上就是引流。這正是語意層存在的理由。" },
+    { "text": "@promo_bot_2024",                   "label": "spam",  "layer": "semantic", "note": "★ 單一 @ 提及。同上——純字串看不出來，語意上『一個叫 promo_bot 的帳號丟來的一句話』就是廣告。" },
+    { "text": "tg @telegroup2024",                 "label": "spam",  "layer": "semantic", "note": "★ tg＋@ 弱組合（2 分）。導流意圖明確但沒有高危險詞。" },
+    { "text": "promote your channel",              "label": "spam",  "layer": "semantic", "note": "★ 單一 moderate 詞。英文、指向明確、陌生私訊情境下是廣告。" },
+    { "text": "click here",                        "label": "spam",  "layer": "semantic", "note": "★ 單一英文弱信號。孤立看毫無意義，要看它是一則陌生私訊的全部內容。" },
+
+    { "text": "你好，最近怎么样？",                "label": "legit", "layer": "regex",    "note": "誤封回歸（test_normal_text_not_spam）" },
+    { "text": "这个周末我们出去玩吧",              "label": "legit", "layer": "regex",    "note": "同上" },
+    { "text": "我出钱请你吃饭",                    "label": "legit", "layer": "regex",    "note": "「出」單字誤封回歸" },
+    { "text": "今天博客更新了",                    "label": "legit", "layer": "regex",    "note": "「博」誤封回歸" },
+    { "text": "我刚看完一本小说",                  "label": "legit", "layer": "regex",    "note": "「彩」相關誤封回歸" },
+    { "text": "谢谢你的关注",                      "label": "legit", "layer": "regex",    "note": "「關注」但非刷粉" },
+    { "text": "我们讨论一下投资的话题",            "label": "legit", "layer": "regex",    "note": "★ 投資話題非廣告。含 moderate 詞但是正常對話——正則給 2 分剛好在門檻下。" },
+    { "text": "她在博物馆工作",                    "label": "legit", "layer": "regex",    "note": "「博物館」誤封回歸" },
+    { "text": "我来参加你的生日派对",              "label": "legit", "layer": "regex",    "note": "誤封回歸" },
+    { "text": "收到，谢谢！",                      "label": "legit", "layer": "regex",    "note": "誤封回歸" },
+    { "text": "你好，今天天气不错，周末一起吃饭吗？", "label": "legit", "layer": "regex", "note": "test_scoring — 分數應為 0" },
+    { "text": "普通消息",                          "label": "legit", "layer": "regex",    "note": "test_pass_never_blocked" },
+    { "text": "好的收到",                          "label": "legit", "layer": "regex",    "note": "同上" },
+    { "text": "今天加班",                          "label": "legit", "layer": "regex",    "note": "同上" },
+    { "text": "谢谢啦",                            "label": "legit", "layer": "regex",    "note": "同上" },
+
+    { "text": "你好，想請問你們接不接企業內訓的合作？", "label": "legit", "layer": "semantic", "note": "★ 沒有任何正則命中，但也沒有任何可疑處。合作洽談的典型形狀。" },
+    { "text": "Hi, we'd love to collaborate on a project — are you open to a call next week?", "label": "legit", "layer": "semantic", "note": "★ 英文、有邀約、但針對性明確。與 spam 的分野在『是否群發模板』，這只有語意能判斷。" },
+    { "text": "我之前買過你們的東西，想問保固怎麼算", "label": "legit", "layer": "semantic", "note": "★ 引用既有往來。陌生帳號說這種話可能是詐騙，但『有具體的既有關係描述』是支持正常往來的證據。" }
+  ]
+}
