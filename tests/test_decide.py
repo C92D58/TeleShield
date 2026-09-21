@@ -104,11 +104,16 @@ def test_high_confidence_spam_is_not_downgraded_by_needs_human():
 # ════════════════════════════════════════════════════════════════
 # ③ 服務掛掉時保守：絕不因為連不上就放行
 # ════════════════════════════════════════════════════════════════
+# ★ 一定要給 id ✗ 不要讓 pytest 自己推導 ID。
+#   它對每個參數做 getattr(val, "__name__") ✗ 而 py3.9 的 HTTPError 實例
+#   在那條路徑上會拋 KeyError（不是 AttributeError ✗ 所以預設值救不了）✗
+#   整個檔案在**收集階段**就炸掉 ✗ 連一個測試都跑不到。
+#   3.11 之後沒這個問題 ✗ 所以本機綠燈、CI 的 3.9 紅燈 ✗ 拖了三個提交才發現。
 @pytest.mark.parametrize("exc", [
-    urllib.error.URLError("no route"),
-    urllib.error.HTTPError("u", 503, "unavailable", {}, None),
-    TimeoutError(),
-    OSError("connection reset"),
+    pytest.param(urllib.error.URLError("no route"), id="urlerror"),
+    pytest.param(urllib.error.HTTPError("u", 503, "unavailable", {}, None), id="httperror-503"),
+    pytest.param(TimeoutError(), id="timeout"),
+    pytest.param(OSError("connection reset"), id="oserror-reset"),
 ])
 def test_service_failure_routes_to_human_not_allow(exc):
     d = decide(AMBIGUOUS_TEXT, judge=FakeJudge(raises=exc))
