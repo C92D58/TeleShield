@@ -325,8 +325,13 @@ TeleShield/
 │   ├── scoring.py         # spam scoring engine (v0.10.0)
 │   ├── behavior.py        # group behavior analysis (v0.10.0)
 │   ├── ocr.py             # local Tesseract OCR (data stays local)
-│   └── client.py          # Telethon client factory
-├── tests/                 # 69 pytest cases (false-positive regression/scoring/behavior/storage)
+│   ├── client.py          # Telethon client factory
+│   ├── systemd.py         # v0.11.0 — service unit + logrotate generation
+│   ├── updater.py         # v0.11.0 — GitHub Release check + checksum verify
+│   ├── ml.py              # v0.11.0 — local Naive Bayes (char-bigram, no deps)
+│   ├── dashboard.py       # v0.11.0 — localhost web dashboard (http.server)
+│   └── cloudsync.py       # v0.11.0 — optional list sync to Cloudflare KV
+├── tests/                 # 378 pytest cases (all offline; no network in CI)
 ├── .github/workflows/     # CI (ruff + pytest on 3 versions + build + auto Release)
 ├── pyproject.toml         # packaging (pip install teleshield)
 ├── install.sh             # one-click install script
@@ -338,10 +343,106 @@ TeleShield/
 ├── user.session           # Telegram login session (encrypted + 600)
 ├── config.json            # settings + learned patterns + lists
 ├── learned_patterns.json  # learn-mode patterns, separate storage
-├── block_log.json         # block records (used for reports)
+├── block_log.json         # block records + blocked message text (for local ML)
+├── ml_model.json          # trained classifier (delete it to disable that layer)
+├── cloud_backup_*.json    # pre-sync snapshots (rollback for --cloud)
 ├── .env                   # credentials (optional)
-└── report_*.html          # HTML reports (--report-html)
+├── report_*.html          # HTML reports (--report-html)
+└── logrotate.conf         # user-level rotation config (system mode uses /etc)
 ```
+
+---
+
+## 🛠️ Operations (v0.11.0)
+
+### Run it as a service
+
+```bash
+teleshield --systemd install      # user-level (starts on login)
+teleshield --systemd install --system   # system-level (starts on boot, needs root)
+teleshield --systemd status
+teleshield --systemd uninstall
+```
+
+The generated unit sets `Restart=always` with `RestartSec=5`, and a
+`StartLimitIntervalSec`/`StartLimitBurst` pair so a permanently broken config
+backs off instead of restarting in a tight loop. It is also hardened:
+`NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full`, `ProtectHome=read-only`,
+with `ReadWritePaths` limited to the data directory.
+
+Log rotation uses `copytruncate` on purpose: the daemon keeps its log file open,
+and plain rotation would leave it writing to the moved inode.
+
+### Update in place
+
+```bash
+teleshield --update --check   # only report
+teleshield --update           # download, verify sha256, install
+```
+
+The download is verified against the asset's `sha256` digest **before** it is
+installed, and a failed check deletes the file. If the release publishes no
+digest, the update still proceeds but says so.
+
+### Local ML layer
+
+```bash
+teleshield --ml train         # train from block_log + labelled fixtures
+teleshield --ml stats
+```
+
+A Multinomial Naive Bayes classifier in pure Python — no scikit-learn, no
+numpy, no tokenizer package. Chinese has no word delimiters, so it uses
+character bigrams instead: `加我微信` yields `加我`, `我微`, `微信`. URLs and long
+digit runs are normalized to `<URL>` / `<NUM>`, otherwise every ad's unique link
+becomes a one-off feature and nothing is learned.
+
+Where it sits in the pipeline, and what it is **not** allowed to do:
+
+```
+severe regex → scoring → Jev (semantic) → thresholds → local ML
+```
+
+The ML layer only ever upgrades `review` to `block`. It never downgrades a
+block, and it never turns an `allow` into a block — false positives are the
+expensive direction, so a weak model is only trusted to be more conservative.
+It also gets a say when the semantic layer is unreachable, which is otherwise a
+blind spot.
+
+Measured with `tools/calibrate.py --judge typesafe` on the labelled set:
+blocked 21 vs 20 without it, with zero false positives and zero false allows,
+and the safe `auto_block` plateau widens from `[0.30, 0.50]` to `[0.30, 0.80]`.
+That is one extra catch on 23 cases — real, small, and free. Delete
+`~/.teleshield/ml_model.json` to switch the layer off entirely.
+
+### Dashboard
+
+```bash
+teleshield --dashboard              # http://127.0.0.1:8787
+teleshield --dashboard --port 9000
+teleshield --dashboard --allow-remote   # bind 0.0.0.0 — no auth, trusted nets only
+```
+
+Serves block statistics (by day, by hour, by source, top reasons), the recent
+block log, and black/white list management. Built on `http.server` with zero
+dependencies, bound to localhost by default, and it re-reads the config before
+writing lists so it cannot clobber what the daemon just saved.
+
+### Cloud list sync (optional)
+
+```bash
+teleshield --cloud status
+teleshield --cloud push      whitelist
+teleshield --cloud pull      all --merge
+teleshield --cloud sync      all
+```
+
+Keeps black/white lists in Cloudflare KV so several machines share one list.
+Requires all three `TELESHIELD_CF_*` variables; without them it says which one
+is missing instead of failing obscurely. Every destructive operation snapshots
+the previous state to `cloud_backup_<list>.json` first, so a wrong direction is
+recoverable. The API token is never written to a backup, a log, or an error
+message.
 
 ---
 
@@ -352,12 +453,19 @@ TeleShield/
 - [x] Phase 2 features: tiered rule engine, spam scoring, group behavior analysis, HTML reports, community list import/export
 - [x] Security-audit fixes: session/config 600 permissions, env-based credentials, both-script coverage, false-positive regression tests
 
+**Done (v0.11.0):**
+- [x] Phase 3: systemd one-click deployment (daemon + log rotation + auto-restart)
+- [x] Auto-update (checks GitHub Release + checksum)
+- [x] ML classifier (local Naive Bayes trained on block_log)
+- [x] Web dashboard (view block stats + manage lists)
+- [x] Cloud list sync (optional, black/white lists → CF KV)
+
 **Planned:**
-- [ ] Phase 3: systemd one-click deployment (daemon + log rotation + auto-restart)
-- [ ] Auto-update (checks GitHub Release + checksum)
-- [ ] ML classifier (local Naive Bayes trained on block_log)
-- [ ] Web dashboard (view block stats + manage lists)
-- [ ] Cloud list sync (optional, black/white lists → CF KV)
+- [ ] Richer labelled set — the calibration set needs real cases, especially
+      ones the regex layer misses but the semantic layer catches
+- [ ] Re-run `tools/calibrate.py` once enough real traffic accumulates, and
+      re-check the `ml_block` threshold against the enlarged set
+- [ ] Scheduler for recurring scans (cron/timer), so `--scan` need not be manual
 
 ---
 

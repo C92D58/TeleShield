@@ -124,18 +124,29 @@ def save_block_log(log: dict) -> None:
     _atomic_write(BLOCK_LOG, log)
 
 
-def log_block(user_id: int, name: str, reason: str, source: str = "private") -> None:
-    """記錄封鎖事件（保留最近 500 筆）。"""
+def log_block(user_id: int, name: str, reason: str, source: str = "private",
+              text: str = "") -> None:
+    """記錄封鎖事件（保留最近 500 筆）。
+
+    `reason` 是**給人看的理由**（例如「severe 正則命中」）✗
+    `text` 是**被擋下的訊息原文**（截斷 500 字）✗
+
+    ★ 為什麼要分開：本機 ML 分類器要學的是「訊息長什麼樣」✗
+      如果只有 reason ✗ 它學到的會是「理由標籤長什麼樣」——那沒有意義。
+      原文只存在**這台機器**（檔案 600）✗ 是這個工具能離線訓練的前提。
+      不需要的人不要傳 text ✗ 那一筆就不會被拿去訓練。
+    """
     log = load_block_log()
-    log["blocks"].append(
-        {
-            "user_id": user_id,
-            "name": name,
-            "reason": reason[:200],
-            "source": source,
-            "time": datetime.now(timezone.utc).isoformat(),
-        }
-    )
+    entry = {
+        "user_id": user_id,
+        "name": name,
+        "reason": reason[:200],
+        "source": source,
+        "time": datetime.now(timezone.utc).isoformat(),
+    }
+    if text:
+        entry["text"] = text[:500]
+    log["blocks"].append(entry)
     if len(log["blocks"]) > 500:
         log["blocks"] = log["blocks"][-500:]
     save_block_log(log)

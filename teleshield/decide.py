@@ -106,12 +106,23 @@ class Thresholds:
     #   實測模型的 needs_human 落在 0.24-0.78 ✗ 原本的 0.35 等於把每一則都推去人工。
     #   0.65 讓 15/18 正常訊息自動放行 ✗ 只留真正模糊的 4 則。
     review: float = 0.65
+    # ★ 本機 ML 的門檻。它只做一件事：把「要人看」升級成「封鎖」。
+    #   為什麼門檻要這麼高（0.90）：模型是用 39 案標註集 + 目前累積的封鎖紀錄
+    #   訓練的 ✗ 樣本很小 ✗ 對沒見過的文案沒有泛化保證。所以它只能當
+    #   **免費的第二意見** ✗ 而且只在兩個地方出手：
+    #     ① 語意層說「要人看」時 ✗ 若本機模型非常確定 ✗ 直接封
+    #     ② 語意層**掛掉**時（連不上、沒金鑰）✗ 至少還有一層能判斷
+    #   ★ 它永遠不會讓一則訊息**放行** ✗ 放行是代價高的方向 ✗ 不交給弱模型。
+    #   校準方式：tools/calibrate.py 跑出來看它有沒有真的多抓到 ✗ 沒有就關掉
+    #   （把 ml_model.json 刪掉即可 ✗ 這一層會自動停用）。
+    ml_block: float = 0.90
 
     def clamp(self) -> "Thresholds":
         a = min(max(self.auto_block, 0.0), 1.0)
         al = min(max(self.auto_allow, 0.0), 1.0)
         r = min(max(self.review, 0.0), 1.0)
-        return Thresholds(auto_block=a, auto_allow=al, review=r)
+        ml = min(max(self.ml_block, 0.0), 1.0)
+        return Thresholds(auto_block=a, auto_allow=al, review=r, ml_block=ml)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -128,6 +139,7 @@ class Decision:
     risk: float | None = None          # ★ P(spam) + P(scam)：不良意圖的合計機率
     needs_human: float | None = None   # Noul 的機率
     tier: str | None = None            # 正則命中的最高嚴重級
+    ml_score: float | None = None      # 本機模型的 P(spam)。None = 這一層沒有意見
     hits: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
     note: str = ""
@@ -353,6 +365,62 @@ def _read_noul(ans) -> float | None:
     return None
 
 
+# ════════════════════════════════════════════════════════════════════
+# 第四層：本機 ML（免費 ✗ 所以可以每則都跑）
+# ════════════════════════════════════════════════════════════════════
+# ★ 為什麼要快取：模型是一個 JSON ✗ 每則訊息重讀一次是浪費 ✗
+#   但也不能永遠快取 ✗ 使用者剛訓練完要立刻生效 ✗
+#   所以比對 mtime：檔案換了才重載。
+_ML_CACHE: dict[str, Any] = {"mtime": None, "model": None}
+
+
+def get_ml_model():
+    """載入本機模型。沒有、壞掉、或沒訓練過 → None（這一層就是關的）。"""
+    try:
+        from . import ml
+    except ImportError:  # pragma: no cover
+        return None
+    try:
+        mtime = ml.DEFAULT_MODEL_FILE.stat().st_mtime
+    except OSError:
+        return None
+    if _ML_CACHE["mtime"] != mtime:
+        try:
+            _ML_CACHE["model"] = ml.load_model(ml.DEFAULT_MODEL_FILE)
+        except Exception:  # 壞檔不該讓整條管線掛掉
+            _ML_CACHE["model"] = None
+        _ML_CACHE["mtime"] = mtime
+    return _ML_CACHE["model"]
+
+
+def _ml_spam_score(text: str) -> float | None:
+    """本機模型的 P(spam)。None = 這一層沒有意見 ✗ 不是「正常訊息」。"""
+    model = get_ml_model()
+    if model is None:
+        return None
+    try:
+        from .ml import score
+        return score(text, model)
+    except Exception:  # pragma: no cover
+        return None
+
+
+def _ml_maybe_block(d: "Decision", text: str, th: Thresholds) -> "Decision":
+    """把「要人看」升級成「封鎖」✗ 只在 ML 非常確定時。
+
+    ★ 方向只有一邊：review → block。
+      它不會把 block 降級 ✗ 也不會把 allow 升級 ✗
+      放行是代價高的方向（放過一則廣告）✗ 但**誤封真人代價更高** ✗
+      所以弱模型只被允許往「更保守」的方向推。
+    """
+    p = _ml_spam_score(text)
+    d.ml_score = p
+    if p is not None and p >= th.ml_block and d.action == "review":
+        d.action = "block"
+        d.note = (d.note + " " if d.note else "") + ("本機模型認為是垃圾（%.2f）" % p)
+    return d
+
+
 def decide(text: str, ctx: dict | None = None, judge: Judge | None = None,
            thresholds: Thresholds | None = None, cfg: dict | None = None,
            ) -> Decision:
@@ -383,11 +451,14 @@ def decide(text: str, ctx: dict | None = None, judge: Judge | None = None,
         raw = j.judge(build_state(text, ctx), build_questions())
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
         # ★ 服務掛掉不等於「放行」。語意層不可用時，保守地進人工。
-        return Decision(action="review", source="error", tier=tier, hits=hits,
-                        note="System One 呼叫失敗：%s" % type(e).__name__)
+        #   但本機模型還在 ✗ 它免費 ✗ 而且此時是唯一的判斷來源 ✗ 讓它看一看。
+        return _ml_maybe_block(
+            Decision(action="review", source="error", tier=tier, hits=hits,
+                     note="System One 呼叫失敗：%s" % type(e).__name__), text, th)
     except Exception as e:  # 回應形狀不如預期
-        return Decision(action="review", source="error", tier=tier, hits=hits,
-                        note="回應無法解析：%s" % type(e).__name__)
+        return _ml_maybe_block(
+            Decision(action="review", source="error", tier=tier, hits=hits,
+                     note="回應無法解析：%s" % type(e).__name__), text, th)
 
     if not isinstance(raw, dict):
         return Decision(source="error", tier=tier, hits=hits,
@@ -436,5 +507,8 @@ def decide(text: str, ctx: dict | None = None, judge: Judge | None = None,
 
     if is_stub:
         d.note = (d.note + " " if d.note else "") + "離線 stub，不是 Jev 的判斷"
+
+    # ── 第四層：本機 ML 的第二意見（免費）────────────────
+    _ml_maybe_block(d, text, th)
 
     return d

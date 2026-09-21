@@ -171,7 +171,7 @@ async def scan_and_block(dry_run: bool = False):
             # FLAG：只記錄標記，不封鎖（用戶觀察）
             if result.verdict == Verdict.FLAG:
                 flagged += 1
-                log_block(entity.id, name, spam_text, "flag")
+                log_block(entity.id, name, spam_text, "flag", text=spam_text)
                 print(f"      🏷️  可疑（分數 {result.score}）— 已標記，未封鎖")
                 continue
 
@@ -182,7 +182,7 @@ async def scan_and_block(dry_run: bool = False):
             try:
                 await client(BlockRequest(id=entity.id))
                 blocked += 1
-                log_block(entity.id, name, spam_text, "scan")
+                log_block(entity.id, name, spam_text, "scan", text=spam_text)
                 print(f"      ✅ 封鎖（分數 {result.score}）")
             except Exception as e:
                 print(f"      ❌ 失敗: {e}")
@@ -285,7 +285,7 @@ async def scan_groups(dry_run: bool = False):
                 # FLAG：只記錄標記
                 if result.verdict == Verdict.FLAG:
                     flagged += 1
-                    log_block(msg.sender_id, sname, spam_reason, "flag")
+                    log_block(msg.sender_id, sname, spam_reason, "flag", text=spam_reason)
                     print(f"     🏷️  可疑（分數 {result.score}）— 已標記，未踢除")
                     continue
 
@@ -296,7 +296,7 @@ async def scan_groups(dry_run: bool = False):
                     rights = ChatBannedRights(until_date=None, view_messages=True)
                     await client(EditBannedRequest(entity, msg.sender_id, rights))
                     kicked += 1
-                    log_block(msg.sender_id, sname, spam_reason, "group")
+                    log_block(msg.sender_id, sname, spam_reason, "group", text=spam_reason)
                     print("     ✅ 已踢除")
                     await asyncio.sleep(1)
                 except UserAdminInvalidError:
@@ -420,7 +420,7 @@ async def listen():
 
             # FLAG：只標記不封鎖
             if result.verdict == Verdict.FLAG:
-                log_block(sender_id, name, spam_text, "flag")
+                log_block(sender_id, name, spam_text, "flag", text=spam_text)
                 cfg["flagged_count"] = cfg.get("flagged_count", 0) + 1
                 save_config(cfg)
                 print(f"     🏷️  可疑（分數 {result.score}）— 已標記，未封鎖")
@@ -430,7 +430,7 @@ async def listen():
                 await client(BlockRequest(id=sender_id))
                 cfg["blocked_count"] = cfg.get("blocked_count", 0) + 1
                 save_config(cfg)
-                log_block(sender_id, name, spam_text, "private")
+                log_block(sender_id, name, spam_text, "private", text=spam_text)
                 print(f"     ✅ 封鎖（分數 {result.score}）（累計 {cfg['blocked_count']}）")
             except Exception as e:
                 print(f"     ❌ 封鎖失敗: {e}")
@@ -493,7 +493,7 @@ async def listen():
 
             # FLAG：只標記不踢除
             if result.verdict == Verdict.FLAG:
-                log_block(sender_id, sname, spam_reason, "flag")
+                log_block(sender_id, sname, spam_reason, "flag", text=spam_reason)
                 cfg["flagged_count"] = cfg.get("flagged_count", 0) + 1
                 save_config(cfg)
                 print(f"     🏷️  可疑（分數 {result.score}）— 已標記，未踢除")
@@ -504,7 +504,7 @@ async def listen():
                 await client(EditBannedRequest(chat, sender_id, rights))
                 cfg["kicked_count"] = cfg.get("kicked_count", 0) + 1
                 save_config(cfg)
-                log_block(sender_id, sname, spam_reason, "group")
+                log_block(sender_id, sname, spam_reason, "group", text=spam_reason)
                 print(f"     ✅ 已踢除（分數 {result.score}）（累計 {cfg['kicked_count']}）")
             except Exception as e:
                 print(f"     ❌ 踢除失敗: {e}")
