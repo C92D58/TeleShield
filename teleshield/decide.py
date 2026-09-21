@@ -52,6 +52,18 @@ __all__ = [
 SYSTEMONE_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_MODEL = "jev-latest"
 
+# ★ Score 的等級表。回來的 score 是這裡的位置 0..N-1 ✗ 不是 0-100。
+#   官方文件：「For a three-level scale it runs from 0 to 2」✗
+#   要用就得除以 len(criteria)-1 正規化。
+AGGRESSION_LEVELS = [
+    "完全被動陳述，沒有任何催促或要求",
+    "語氣友善，順帶一提",
+    "明確催促，但留餘地",
+    "明顯施壓，帶時間壓力或後果暗示",
+    "限時逼迫、反覆催促，或製造恐懼",
+]
+AGGRESSION_TOP = len(AGGRESSION_LEVELS) - 1
+
 Action = Literal["block", "review", "allow"]
 
 
@@ -101,7 +113,8 @@ class Decision:
     source: Literal["regex", "jev", "stub", "error"] = "regex"
     kind: str | None = None            # spam / promo / scam / legit
     confidence: float | None = None    # Choice 的信心（分佈集中度）
-    aggression: float | None = None    # Score 的期望值
+    aggression: float | None = None    # Score 的期望值（已正規化到 0-100）
+    risk: float | None = None          # ★ P(spam) + P(scam)：不良意圖的合計機率
     needs_human: float | None = None   # Noul 的機率
     tier: str | None = None            # 正則命中的最高嚴重級
     hits: list[str] = field(default_factory=list)
@@ -110,6 +123,8 @@ class Decision:
 
     def __str__(self) -> str:
         bits = [self.action.upper(), "via " + self.source]
+        if self.risk is not None:
+            bits.append("risk %.2f" % self.risk)
         if self.kind:
             bits.append(self.kind)
         if self.confidence is not None:
@@ -127,7 +142,6 @@ def build_questions() -> dict[str, Any]:
     return {
         "kind": {
             "type": "choice",
-            "options": ["spam", "promo", "scam", "legit"],
             "instructions": (
                 "判斷這則私訊的性質。只看訊息內容本身，不要因為對方是新帳號就改變判斷。"
             ),
@@ -140,12 +154,13 @@ def build_questions() -> dict[str, Any]:
         },
         "aggression": {
             "type": "score",
-            "min": 0,
-            "max": 100,
             "instructions": (
-                "這則訊息對收件者施加壓力的程度。0 = 完全被動陳述；"
-                "50 = 明確催促但留餘地；100 = 限時逼迫、反覆催促、製造恐懼。"
+                "這則訊息對收件者施加壓力的程度。"
             ),
+            # ★ Score 一定要 criteria ✗ 而且是「等級陣列」✗ 不是 min/max。
+            #   送 min/max 會被 API 以 422 拒絕（missing criteria）。
+            #   回來的 score 是等級位置 0..len(criteria)-1 ✗ 不是 0-100。
+            "criteria": AGGRESSION_LEVELS,
         },
         "needs_human": {
             "type": "noul",
@@ -204,7 +219,23 @@ class JevJudge:
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            payload = json.loads(resp.read().decode("utf-8"))
+
+        # ★ 這一行是關鍵：API 回的是 {"model":…, "answers":{…}, "usage":{…}}
+        #   判斷結果在 answers 裡面 ✗ 不是頂層。
+        #   原本直接 return 整個 payload ✗ 於是 decide() 的 raw.get("kind") 永遠是 None ✗
+        #   真實模型的判斷一次都沒被用到 ✗ 每則訊息都靜靜地掉進 review ✗
+        #   API 呼叫照樣計費 ✗ 這是接了真 key 才會發現的那種 bug。
+        if not isinstance(payload, dict):
+            raise ValueError("回應不是物件：%s" % type(payload).__name__)
+        answers = payload.get("answers")
+        if not isinstance(answers, dict):
+            raise ValueError("回應缺少 answers 欄位（拿到 %s）" % list(payload)[:5])
+
+        # 把 model / usage 留在旁邊 ✗ 方便事後看成本與版本 ✗ 底線開頭不會被當成題目答案。
+        answers["_model"] = payload.get("model")
+        answers["_usage"] = payload.get("usage")
+        return answers
 
 
 class StubJudge:
@@ -278,6 +309,19 @@ def _read_choice(ans) -> tuple[str | None, float | None]:
     return v, (float(c) if isinstance(c, (int, float)) and not isinstance(c, bool) else None)
 
 
+def _read_probs(ans) -> dict[str, float]:
+    """讀 Choice 的機率分佈。★ 這個比 confidence 有用 ✗ 見下方 decide() 的說明。"""
+    a = _as_dict(ans)
+    p = a.get("probabilities")
+    if not isinstance(p, dict):
+        return {}
+    out: dict[str, float] = {}
+    for k, v in p.items():
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[str(k)] = float(v)
+    return out
+
+
 def _read_score(ans) -> float | None:
     a = _as_dict(ans)
     for k in ("value", "score", "expected"):
@@ -289,7 +333,9 @@ def _read_score(ans) -> float | None:
 
 def _read_noul(ans) -> float | None:
     a = _as_dict(ans)
-    for k in ("probability", "value", "prob", "p"):
+    # ★ "noul" 是 API 實際回的欄位名（{"type":"noul","noul":0.97}）。
+    #   原本漏了它 ✗ 導致真實回應一律讀成 None ✗ 「模糊交人工」的閘門形同關閉。
+    for k in ("noul", "probability", "value", "prob", "p"):
         v = a.get(k)
         if isinstance(v, (int, float)) and not isinstance(v, bool):
             return float(v)
@@ -339,15 +385,35 @@ def decide(text: str, ctx: dict | None = None, judge: Judge | None = None,
     source: Literal["jev", "stub"] = "stub" if is_stub else "jev"
 
     kind, conf = _read_choice(raw.get("kind") or {})
+    probs = _read_probs(raw.get("kind") or {})
+    # ★ 為什麼不能只用 confidence 當封鎖門檻：
+    #   實測（2026-09-21）垃圾訊息會同時像 spam 和 scam ✗ 機率被分到兩個選項 ✗
+    #   Choice 的 confidence 是「分佈集中度」✗ 於是掉到 0.36-0.75 ✗
+    #   但同一批的 spam+scam 合計是 0.84-0.97 ✗ 而正常訊息最高只有 0.03。
+    #   → 訊號在合計裡 ✗ 不在集中度裡。用 confidence 當門檻會把這些全放進人工。
+    risk = (probs.get("spam", 0.0) + probs.get("scam", 0.0)) if probs else None
+    # 沒有分佈的 judge（例如只回一個 selected 選項）就退回用 confidence ✗
+    # 這樣舊行為不變 ✗ 而有分佈時用的是更準的訊號。
+    if risk is None and kind in ("spam", "scam") and conf is not None:
+        risk = conf
     aggr = _read_score(raw.get("aggression") or {})
+    # ★ 兩個 judge 的尺度必須一致：
+    #   真 Jev 回 0..AGGRESSION_TOP（等級位置）✗ stub 直接給 0-100。
+    #   這裡統一正規化成 0-100 ✗ 否則 Decision.aggression 的意義會隨 judge 改變。
+    if aggr is not None and not is_stub:
+        aggr = aggr / AGGRESSION_TOP * 100.0
     needs = _read_noul(raw.get("needs_human") or {})
 
     d = Decision(source=source, kind=kind, confidence=conf, aggression=aggr,
-                 needs_human=needs, tier=tier, hits=hits, raw=raw)
+                 risk=risk, needs_human=needs, tier=tier, hits=hits, raw=raw)
 
     # ── 第三層：把機率變成行為 ────────────────────────────
-    if kind in ("spam", "scam") and conf is not None and conf >= th.auto_block:
+    # ★ 封鎖看 risk（不良意圖的合計機率）而不是 conf（選項集中度）。
+    #   kind 仍然要看 ✗ 否則一則 spam 0.4 / promo 0.6 的訊息也會被封 ✗ 那不該封。
+    if kind in ("spam", "scam") and risk is not None and risk >= th.auto_block:
         d.action = "block"
+    elif kind in ("legit", "promo") and risk is not None and risk < (1.0 - th.auto_allow) and (needs or 0) < th.review:
+        d.action = "allow"
     elif kind == "legit" and conf is not None and conf >= th.auto_allow and (needs or 0) < th.review:
         d.action = "allow"
     else:

@@ -211,3 +211,134 @@ def test_context_reaches_the_judge():
     j = FakeJudge()
     decide(AMBIGUOUS_TEXT, ctx={"is_contact": False}, judge=j)
     assert j.last_state.get("is_contact") is False
+
+
+# ════════════════════════════════════════════════════════════════════
+# ⑤ 對接真實 API：這一節的每一條都對應一個「接了真 Jev 才會發現」的缺陷
+#    用 2026-09-21 實測 API 回來的真實形狀寫成斷言 ✗ 不用發明形狀。
+# ════════════════════════════════════════════════════════════════════
+def test_every_question_carries_what_the_api_requires():
+    """★ API 對每個題型有硬性欄位要求 ✗ 少一個就是 422 ✗ 整層靜默失效。
+
+    Score 一定要 criteria（等級陣列）。送 min/max 會被回
+    {"type":"missing","loc":["body","questions","aggression","score","criteria"]}。
+    """
+    q = build_questions()
+    for qid, spec in q.items():
+        assert spec.get("instructions"), "%s 缺 instructions" % qid
+        if spec["type"] == "score":
+            assert "criteria" in spec, "%s 是 score ✗ 一定要 criteria（API 會 422）" % qid
+            assert isinstance(spec["criteria"], list), "%s 的 criteria 要是等級陣列" % qid
+            assert len(spec["criteria"]) >= 2, "%s 至少要有兩級" % qid
+        if spec["type"] == "choice":
+            assert "criteria" in spec, "%s 是 choice ✗ 一定要 criteria（API 會 422）" % qid
+            assert isinstance(spec["criteria"], dict), "%s 的 criteria 要是選項 map" % qid
+    # 不該出現 API 不認識的欄位（options 不是 TypeSafe 的欄位名）
+    for qid, spec in q.items():
+        extra = set(spec) - {"type", "instructions", "criteria"}
+        assert not extra, "%s 帶了 API 不認得的欄位：%s" % (qid, extra)
+
+
+def test_reads_the_real_api_answer_shape():
+    """真實回應（2026-09-21 實測）✗ 三個題型的欄位名都在這裡定住。
+
+    最容易錯的是 Noul ✗ 它的機率欄位就叫 noul ✗ 不是 probability。
+    """
+    real = {
+        "model": "jev-1.13.0",
+        "answers": {
+            "kind": {"type": "choice", "choice": "spam", "confidence": 0.93,
+                     "probabilities": {"spam": 0.93, "promo": 0.07, "scam": 0.0, "legit": 0.0}},
+            "aggression": {"type": "score", "score": 2.0, "confidence": 1.0,
+                           "legend": {"0": "低", "1": "中", "2": "高"},
+                           "probabilities": {"0": 0.0, "1": 0.0, "2": 1.0}},
+            "needs_human": {"type": "noul", "noul": 0.42},
+        },
+    }
+
+    class RealShapeJudge:
+        def judge(self, state, questions):
+            return real["answers"]
+
+    d = decide(AMBIGUOUS_TEXT, judge=RealShapeJudge())
+    assert d.kind == "spam", "choice 欄位沒讀到"
+    assert d.confidence == 0.93
+    assert d.needs_human == 0.42, "★ noul 欄位沒讀到 ✗ 真回應的機率就叫 noul"
+    assert d.source == "jev"
+
+
+def test_aggression_is_normalised_across_both_judges():
+    """★ 兩個 judge 的尺度必須一致 ✗ 否則 Decision.aggression 的意義會變。
+
+    真 Jev 回等級位置 0..len(criteria)-1（實測 5 級表回 0–4）✗
+    stub 直接給 0-100 ✗ 不對齊的話同一則訊息會有兩種數字。
+    """
+    from teleshield.decide import AGGRESSION_LEVELS, AGGRESSION_TOP
+    assert AGGRESSION_TOP == len(AGGRESSION_LEVELS) - 1
+
+    class TopLevelJudge:
+        def judge(self, state, questions):
+            return {"kind": {"choice": "legit", "confidence": 0.9},
+                    "aggression": {"type": "score", "score": float(AGGRESSION_TOP)},
+                    "needs_human": {"type": "noul", "noul": 0.05}}
+
+    d = decide(AMBIGUOUS_TEXT, judge=TopLevelJudge())
+    assert d.aggression == 100.0, "最高等級應該正規化成 100 ✗ 得到 %r" % d.aggression
+
+
+def test_a_failed_semantic_call_never_looks_like_a_verdict():
+    """服務失敗 → source=error + review ✗ 不能退回 allow ✗ 更不能當成 block。"""
+    class Boom:
+        def judge(self, state, questions):
+            raise urllib.error.HTTPError("u", 422, "Unprocessable Entity", {}, None)
+
+    d = decide(AMBIGUOUS_TEXT, judge=Boom())
+    assert d.source == "error"
+    assert d.action == "review"
+    assert "422" in d.note or "HTTPError" in d.note
+
+
+def test_jev_unwraps_the_answers_envelope():
+    """★ 真實回應是 {"model":…, "answers":{…}, "usage":{…}} ✗ 判斷在 answers 裡。
+
+    原本 JevJudge 直接回傳整個 payload ✗ 於是上層 raw.get("kind") 恆為 None ✗
+    真實模型的判斷一次都沒被採用 ✗ 每則訊息都掉進 review ✗ 而 API 照樣計費。
+    這條測試把「必須拆封」釘住 ✗ 免得又被退回。
+    """
+    import json as _json
+    import urllib.request as _u
+
+    payload = {
+        "model": "jev-1.13.0",
+        "answers": {
+            "kind": {"type": "choice", "choice": "spam", "confidence": 0.9,
+                     "probabilities": {"spam": 0.9, "promo": 0.05, "scam": 0.05, "legit": 0.0}},
+            "aggression": {"type": "score", "score": 1.0},
+            "needs_human": {"type": "noul", "noul": 0.1},
+        },
+        "usage": {"input_tokens": 500, "output_tokens": 60},
+    }
+
+    class FakeResp:
+        def read(self):
+            return _json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    from teleshield.decide import JevJudge
+    j = JevJudge(api_key="k")
+    orig = _u.urlopen
+    _u.urlopen = lambda *a, **k: FakeResp()
+    try:
+        out = j.judge({"t": 1}, {"kind": {"type": "choice", "criteria": {"a": None}}})
+    finally:
+        _u.urlopen = orig
+
+    assert "answers" not in out, "不該把 envelopes 整包往上丟"
+    assert out["kind"]["choice"] == "spam", "★ answers 沒拆開 ✗ 上層會讀不到判斷"
+    assert out["_model"] == "jev-1.13.0"
+    assert out["_usage"]["input_tokens"] == 500
