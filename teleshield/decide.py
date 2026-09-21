@@ -87,14 +87,25 @@ class Thresholds:
       做法：拿 tests/ 裡那些案例當種子，標上「該封 / 不該封」，
       然後看不同門檻下的漏封與誤封，再挑一個你接受的點。
 
+    ★ 下面的預設值是 2026-09-21 用 39 案標註集 + 真 Jev 跑出來的 ✗
+      它是起點 ✗ 不是定論：其中真正需要語意判斷的只有 5 案 ✗ 樣本很小。
+      真實對話累積出新的標註後 ✗ 用 tools/calibrate.py 重跑一遍再調。
+
     auto_block ：信心高於此值才自動封（保守）
     auto_allow ：信心高於此值且模型說不需要人看 ✗ 才自動放行
     review     ：needs_human 高於此值就讓人看一眼
     """
 
-    auto_block: float = 0.90
+    # ★ 實測（2026-09-21，39 案 ✗ 真 Jev）：
+    #   正常訊息 risk 最高 0.03 ✗ 垃圾訊息最低 0.37 ✗ 中間是 12 倍的空隙。
+    #   0.40 落在空隙裡 ✗ 也落在「擋下 20/21、誤封 0、漏放 0」的平台期中段。
+    #   原本的 0.90 高於模型對 spam 的最高信心（0.75）✗ 永遠不會觸發。
+    auto_block: float = 0.40
     auto_allow: float = 0.70
-    review: float = 0.35
+    # ★ review 不是安全閥 ✗ 是**流量旋鈕**：安全由 auto_block 與放行閘把關。
+    #   實測模型的 needs_human 落在 0.24-0.78 ✗ 原本的 0.35 等於把每一則都推去人工。
+    #   0.65 讓 15/18 正常訊息自動放行 ✗ 只留真正模糊的 4 則。
+    review: float = 0.65
 
     def clamp(self) -> "Thresholds":
         a = min(max(self.auto_block, 0.0), 1.0)

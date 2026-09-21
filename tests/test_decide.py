@@ -79,7 +79,7 @@ def test_ambiguous_text_reaches_the_model():
 @pytest.mark.parametrize("kind,conf,expected", [
     ("spam", 0.95, "block"),
     ("scam", 0.93, "block"),
-    ("spam", 0.60, "review"),   # 信心不足 → 人工，不是直接封
+    ("spam", 0.35, "review"),   # 信心不足（低於 auto_block）→ 人工，不是直接封
     ("legit", 0.95, "allow"),
     ("legit", 0.55, "review"),  # 說是正常但沒把握 → 人工
     ("promo", 0.99, "review"),  # promo 不在自動封鎖的清單裡
@@ -171,10 +171,34 @@ def test_block_and_allow_gates_are_independently_settable():
 
 def test_lowering_the_block_gate_makes_it_stricter():
     """門檻降低 = 更多東西被自動封 ✗ 這是刻意的（保守設定）。"""
-    j = FakeJudge(kind="spam", conf=0.70)
+    j = FakeJudge(kind="spam", conf=0.35)
     assert decide(AMBIGUOUS_TEXT, judge=j).action == "review"
-    strict = decide(AMBIGUOUS_TEXT, judge=j, thresholds=Thresholds(auto_block=0.65)).action
+    strict = decide(AMBIGUOUS_TEXT, judge=j, thresholds=Thresholds(auto_block=0.30)).action
     assert strict == "block"
+
+
+def test_the_defaults_are_the_ones_we_measured():
+    """★ 這兩個數字是 2026-09-21 用 39 案標註集 + 真 Jev 跑出來的 ✗ 不是抄來的。
+
+    實測：正常訊息的 risk 最高 0.03 ✗ 垃圾訊息最低 0.37 ✗ 中間有 12 倍的空隙。
+    auto_block 要落在空隙裡（0.40）✗ 原本的 0.90 高於模型對 spam 的最高信心 ✗
+    永遠不會觸發。
+
+    review 不是安全閥 ✗ 安全由 auto_block 與放行閘把關 ✗ review 只管人工量：
+    模型的 needs_human 最低 0.24 ✗ 原本的 0.35 等於把每一則都推去人工。
+
+    這條測試故意把數值釘住 ✗ 未來要改 ✗ 應該是重新校正後的有意決定 ✗
+    而不是隨手調整。
+    """
+    t = Thresholds()
+    assert t.auto_block == 0.40, "auto_block 應該落在 risk 空隙（0.03-0.37）裡"
+    assert t.review == 0.65, "review 太低會把所有正常訊息都推去人工"
+    assert t.auto_block > 0.03, "不能低於正常訊息的 risk 上限，否則會誤封真人"
+    # 唯一那筆 risk 0.37 的案例是**刻意的例外**：模型的自我判決是
+    # legit 0.49 / spam 0.45 ✗ 它自己都說 needs_human 0.60。
+    # 這種案子交人工比自動封更誠實 ✗ 所以門檻不必壓到 0.37 以下。
+    assert t.auto_block <= 0.45, \
+        "再高就會漏掉模型其實有把握的那些（實測 0.50 起擋下數就掉）"
 
 
 # ════════════════════════════════════════════════════════════════

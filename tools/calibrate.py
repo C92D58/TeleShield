@@ -170,7 +170,7 @@ def sweep(cases: list[dict], judge, gates: list[float], auto_allow: float = 0.70
     rows = []
     for g in gates:
         th = Thresholds(auto_block=g, auto_allow=auto_allow, review=0.35).clamp()
-        blocked_spam = missed_spam = blocked_legit = reviews = api_calls = 0
+        blocked_spam = reviewed_spam = allowed_spam = blocked_legit = reviews = api_calls = 0
         for c in cases:
             # 規則層已攔下的不進 API ✗ 要算進去
             if is_spam(c["text"]):
@@ -185,15 +185,20 @@ def sweep(cases: list[dict], judge, gates: list[float], auto_allow: float = 0.70
             if c["label"] == "spam":
                 if action == "block":
                     blocked_spam += 1
+                elif action == "review":
+                    # ★ 進人工不是失敗 ✗ 它被攔下來給人看了 ✗ 有被處理。
+                    reviewed_spam += 1
                 else:
-                    missed_spam += 1
+                    # ★ 只有這個是真正的失誤：垃圾訊息被自動放行 ✗ 直接送到使用者面前。
+                    allowed_spam += 1
             else:
                 if action == "block":
                     blocked_legit += 1
                 if action == "review":
                     reviews += 1
         rows.append({
-            "gate": g, "blocked_spam": blocked_spam, "missed_spam": missed_spam,
+            "gate": g, "blocked_spam": blocked_spam, "reviewed_spam": reviewed_spam,
+            "allowed_spam": allowed_spam,
             "blocked_legit": blocked_legit, "reviews": reviews, "api_calls": api_calls,
         })
     return rows
@@ -292,22 +297,30 @@ def main() -> int:
     gates = [float(x) for x in args.gates.split(",")]
     rows = sweep(cases, judge, gates)
 
-    print("\n  %-6s %-8s %-8s %-10s %-8s %-8s" % ("門檻", "封到spam", "漏掉", "誤封legit", "review", "API呼叫"))
-    print("  " + "-" * 62)
+    print("\n  %-6s %-9s %-9s %-11s %-10s %-8s" % (
+        "門檻", "擋下spam", "進人工", "直接放行✗", "誤封legit", "review"))
+    print("  " + "-" * 66)
     for x in rows:
         flag = ""
         if x["blocked_legit"] > 0:
-            flag = "  ✗ 誤封"
-        elif x["missed_spam"] == 0:
+            flag = "  ✗ 誤封真人"
+        elif x["allowed_spam"] > 0:
+            flag = "  ✗ 垃圾直接送達"
+        else:
             flag = "  ✓"
-        print("  %-6.2f %-8d %-8d %-10d %-8d %-8d%s" % (
-            x["gate"], x["blocked_spam"], x["missed_spam"],
-            x["blocked_legit"], x["reviews"], x["api_calls"], flag))
+        print("  %-6.2f %-9d %-9d %-11d %-10d %-8d%s" % (
+            x["gate"], x["blocked_spam"], x["reviewed_spam"], x["allowed_spam"],
+            x["blocked_legit"], x["reviews"], flag))
+    print()
+    print("  ★ 「進人工」不是漏掉 ✗ 它被攔下來等人確認 ✗ 有被處理。")
+    print("    「直接放行」才是真的失誤 ✗ 垃圾訊息會直接出現在使用者面前。")
 
     # ── 建議 ────────────────────────────────────────────────────
     print()
     # ★ 平台偵測：若多個門檻給出完全一樣的結果 ✗ 掃描就沒有解析度
-    distinct = {(x["blocked_spam"], x["missed_spam"], x["blocked_legit"]) for x in rows}
+    distinct = {(x["blocked_spam"], x["allowed_spam"], x["blocked_legit"]) for x in rows}
+    # ★ 只比「直接放行」不夠 ✗ 它在很多門檻下都是 0 ✗ 會把整條表誤判成平台。
+    #   真正的平台是「兩個安全指標都一樣」的那一段 ✗ 所以一起看擋下數量。
     if len(distinct) <= 2:
         print("  ⚠ 掃描結果只有 %d 種 ✗ 門檻幾乎沒有解析度。" % len(distinct))
         if args.judge == "stub":
@@ -323,21 +336,27 @@ def main() -> int:
     if ok:
         # ★ 不要從平台期裡挑一個點當「建議」✗ 那是假精確 ✓
         #   平台期代表這個區間內所有門檻行為相同 ✗ 該報區間 ✓
-        target = min(x["missed_spam"] for x in ok)
-        band = [x["gate"] for x in ok if x["missed_spam"] == target]
+        # 先求安全（直接放行 = 0 ✗ 誤封 = 0）✗ 再求擋下最多。
+        best_block = max(x["blocked_spam"] for x in ok if x["allowed_spam"] == 0
+                         and x["blocked_legit"] == 0)
+        ok = [x for x in ok if x["allowed_spam"] == 0 and x["blocked_legit"] == 0
+              and x["blocked_spam"] == best_block]
+        target = 0
+        band = [x["gate"] for x in ok]
         if len(band) == 1:
-            print("  零誤封且漏封最少的是 auto_block = %.2f" % band[0])
+            print("  零誤封、零直接放行的是 auto_block = %.2f" % band[0])
         else:
-            print("  零誤封且漏封最少的是 auto_block ∈ [%.2f, %.2f] ✗ 這一段是平台期" % (min(band), max(band)))
+            print("  零誤封、零直接放行的是 auto_block ∈ [%.2f, %.2f] ✗ 這一段是平台期" % (min(band), max(band)))
             print("  （區間內行為完全相同 ✗ 挑哪個都一樣 ✗ 取中間值沒有意義）")
-        print("      漏封 %d ✗ 誤封 0 ✗ review %d 則" % (target, ok[0]["reviews"]))
+        print("      擋下 %d ✗ 直接放行 %d ✗ 誤封 0 ✗ 進人工 %d ✗ review %d 則" % (
+            best_block, target, ok[0]["reviewed_spam"], ok[0]["reviews"]))
         print()
         if args.judge == "stub":
             print("  ★ 但這是 stub 的結果 ✗ 只能證明工具會動")
         elif judge.failed:
             print("  ✗ 這次跑的不是真實結果 ✗ %d / %d 個案例的 API 呼叫失敗了"
                   % (judge.failed, judge.ok + judge.failed))
-            print("    失敗的案例會退回規則層 ✗ 所以上面的「漏封」有一部分是假的 ✗")
+            print("    失敗的案例會退回規則層 ✗ 所以上面的數字有一部分是假的 ✗")
             print("    修掉之後重跑 ✗ 這份掃描不能拿去定門檻 ✗")
             for f in judge.failures()[:5]:
                 print("      · %s" % f)
