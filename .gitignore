@@ -23,3 +23,6 @@ learned_patterns.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Wrangler 的快取含 Cloudflare 帳號資訊 ✗ 不進版本控制
+.wrangler/
