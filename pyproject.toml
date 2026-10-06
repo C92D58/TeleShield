@@ -9,7 +9,7 @@ description = "Telegram 全能廣告封鎖守衛 — personal spam firewall for 
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
-authors = [{ name = "WAHSUN", email = "x@wahsun.org" }]
+authors = [{ name = "TECXIA", email = "x@wahsun.org" }]
 keywords = ["telegram", "spam", "antispam", "telethon", "blocker"]
 classifiers = [
     "Programming Language :: Python :: 3",

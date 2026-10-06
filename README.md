@@ -471,10 +471,12 @@ message.
 
 ## 📄 License
 
-[MIT](LICENSE) © 2026 WAHSUN
+[MIT](LICENSE)
 
 ---
 
 <div align="center">
-  <sub>Made with ❤️ by WAHSUN · Keep Telegram clean</sub>
+  <img src="assets/tecxia-lockup.png" alt="TECXIA | DIGITAL STUDIO" width="280">
+  <br><br>
+  <sub>Made with ❤️ by TECXIA · Keep Telegram clean</sub>
 </div>
