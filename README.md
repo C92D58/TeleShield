@@ -476,7 +476,5 @@ message.
 ---
 
 <div align="center">
-  <img src="assets/tecxia-lockup.png" alt="TECXIA | DIGITAL STUDIO" width="280">
-  <br><br>
-  <sub>Made with ❤️ by TECXIA · Keep Telegram clean</sub>
+  <sub>Made with ❤️ by WAHSUN · Keep Telegram clean</sub>
 </div>
